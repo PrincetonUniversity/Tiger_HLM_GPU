@@ -1,0 +1,37 @@
+##############################################################################
+# --- Generated build artifacts ---------------------------------------------
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.out
+*.exe
+
+# CUDA / RK45 build products
+rk45_solver
+rk45_kernel
+*/obj/
+
+##############################################################################
+# --- Large numeric / profiling outputs --------------------------------------
+*.csv              # dense.csv, final.csv, etc.
+*.nsys-rep         # Nsight Systems reports
+*.sqlite           # profiling DBs created by Nsight
+*.log              # runtime/build logs
+
+##############################################################################
+# --- IDE / editor / OS clutter ---------------------------------------------
+.DS_Store
+*~
+*.swp
+*.swo
+.vscode/
+.idea/
+
+##############################################################################
+# --- Patch / backup files ---------------------------------------------------
+*.orig
+*.bak
+*.patch
+
