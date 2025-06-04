@@ -43,6 +43,13 @@ root/
         └── … (future models go here, e.g. model_foo.hpp + model_foo.cu) …
 ```
 
+**Setting Up the Environment**
+Load the required CUDA toolkit using the following command:
+
+```
+module load udatoolkit/12.9
+```
+
 ## Building & Running
 
 1. **Prerequisites**
