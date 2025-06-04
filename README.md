@@ -2,6 +2,7 @@
 
 ## Directory Structure
 
+```text
 root/
 ├── data/                       
 │   ├── forcings/               # Forcing data (CSV/NetCDF)
@@ -40,8 +41,7 @@ root/
         ├── model_dummy.hpp     # Declares DummyModel::UID, Parameters, __device__ rhs(...), extern devParams
         └── model_dummy.cu      # Defines “__constant__ DummyModel::Parameters devParams;”
         └── … (future models go here, e.g. model_foo.hpp + model_foo.cu) …
-
-
+```
 
 ## Building & Running
 
