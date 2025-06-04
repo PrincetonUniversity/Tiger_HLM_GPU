@@ -79,6 +79,8 @@ By default, it uses `DummyModel::UID`, reads `data/forcing.csv` (if present), in
 * `final.csv` (one line per system: H0,H1,H2,H3,H4 at t=tf)
 * `dense.csv` (“time,H0\_sys0,H1\_sys0,…,H4\_sysN” at `num_queries` sample times).
 
+*Note: Steps 4 and 5 are still drafts, it works for dummy model and will be expanded to model 200/204 soon.*
+
 4. **Add a New Model**
 
 * Create `models/model_new.hpp` following the stub in `model_dummy.hpp`.
