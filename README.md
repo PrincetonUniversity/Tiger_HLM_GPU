@@ -44,6 +44,7 @@ root/
 ```
 
 **Setting Up the Environment**
+
 Load the required CUDA toolkit using the following command:
 
 ```
