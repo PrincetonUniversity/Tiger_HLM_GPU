@@ -59,10 +59,10 @@ __device__ void rk45_step(
 
     double y_temp[N_EQ];
 
-    // ─── Stage 1: compute k[0] ───
+    // ─── Stage 1: Compute k[0] ───
     Model::rhs(t, y, k[0], N_EQ);
 
-    // ─── Stage 2: compute k[1..6] ───
+    // ─── Stage 2: Compute k[1..6] ───
     for (int s = 1; s < 7; ++s) {
         // Build y_temp = y + h * Σ_{j< s} a[s][j] * k[j][i]
         for (int i = 0; i < N_EQ; ++i) {
@@ -76,7 +76,7 @@ __device__ void rk45_step(
         Model::rhs(t + c[s] * h, y_temp, k[s], N_EQ);
     }
 
-    // ─── Stage 3: build y_out (5th‐order) ───
+    // ─── Stage 3: Build y_out (5th‐order) ───
     for (int i = 0; i < N_EQ; ++i) {
         double acc = y[i];
         for (int s = 0; s < 7; ++s) {
@@ -85,7 +85,7 @@ __device__ void rk45_step(
         y_out[i] = acc;
     }
 
-    // // ─── Stage 4: compute error_norm (L₂ norm) ───
+    // // ─── Stage 4: Compute error_norm (L₂ norm) ───
     // double err_sum = 0.0;
     // for (int i = 0; i < N_EQ; ++i) {
     //     double y_err = 0.0;
