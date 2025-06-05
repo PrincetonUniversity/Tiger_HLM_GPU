@@ -41,25 +41,21 @@ __global__ void rk45_kernel_multi(
     while (t < tf) {
         if (t + h > tf) h = tf - t;
 
-        // ── Stage 1: compute k[0]
-        Model::rhs(t, y, k[0], N_EQ);
-
-        // ── Stage 2..5: compute k[1..6], y_next, error_norm
-        rk45_step_dense<Model>(t, y, y_next, N_EQ, h, &error_norm, k, nullptr, 0.0);
+        // ── Stage 1: take exactly one RK45 step (fills k[0..6], y_next, error_norm)
+        rk45_step<Model>(t, y, y_next, N_EQ, h, &error_norm, k); // step‐error for acceptance, slopes for dense
 
         if (error_norm <= 1.0) {
+            // ── Accept step
             double t_next = t + h;
 
             // ── Dense output for queries in (t, t_next]
-            while (next_q_idx < num_queries && query_times[next_q_idx] <= t_next) {
+            while (next_q_idx < num_queries && query_times[next_q_idx] <= t_next+ 1e-14) {
                 double tq = query_times[next_q_idx];
-                if (tq >= t) {
+                if (tq > t) {
                     double theta = (tq - t) / h;
+                    // 0 < theta ≤ 1  ensures dense‐output returns the correct point
                     double y_dense[N_EQ];
-
-                    rk45_step_dense<Model>(
-                        t, y, y_next, N_EQ, h, &error_norm, k, y_dense, theta
-                    );
+                    rk45_dense<Model>(y, k, N_EQ, h, theta, y_dense); // output: y(t + θ·h)       
 
                     for (int i = 0; i < N_EQ; ++i) {
                         int idx = sys_id * (N_EQ * num_queries)
@@ -71,16 +67,20 @@ __global__ void rk45_kernel_multi(
                 next_q_idx++;
             }
 
-            // ── Accept step
+            // Update state and time
             for (int i = 0; i < N_EQ; ++i) {
                 y[i] = y_next[i];
             }
             t = t_next;
-        }
 
-        // ── Adjust step size
-        double factor = devParams.safety * pow(1.0 / (error_norm + 1e-16), 0.2);
-        h *= fmin(fmax(factor, devParams.minScale), devParams.maxScale);
+            // ── Adjust step size
+            double factor = devParams.safety * pow(1.0 / (error_norm + 1e-16), 0.2);
+            h *= fmin(fmax(factor, devParams.minScale), devParams.maxScale);
+        } else {
+            // ── Reject step: reduce step size and retry
+            double factor = devParams.safety * pow(1.0 / (error_norm + 1e-16), 0.2);
+            h *= fmin(fmax(factor, devParams.minScale), devParams.maxScale);
+        }
     }
 
     // ─── Write final state
