@@ -1,10 +1,12 @@
 #pragma once
 
-#include "solver/rk45_api.hpp"     // Brings in: namespace rk45_api
-#include "models/model_dummy.hpp" // Brings in DummyModel::Parameters and extern devParams
+#include "solver/rk45_api.hpp"     // For namespace rk45_api
+#include "models/model_dummy.hpp" // For DummyModel::Parameters and extern devParams
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Define a fully templated version of setModelParameters.
+// Copies host‐side Model::Parameters into the device constant symbol devParams.
+// Throws std::runtime_error if cudaMemcpyToSymbol fails.
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rk45_api {
     template <typename Model>
