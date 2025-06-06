@@ -4,8 +4,8 @@
 #include <cuda_runtime.h>
 #include <vector>
 #include <stdexcept>
-#include "rk45.h"                // For template< class Model > rk45_kernel_multi<…>
-#include "models/model_dummy.hpp"// For DummyModel::Parameters, etc.
+#include "rk45.h"                 // For template< class Model > rk45_kernel_multi<…>
+#include "models/model_dummy.hpp" // For DummyModel::Parameters, etc.
 
 namespace rk45_api {
 

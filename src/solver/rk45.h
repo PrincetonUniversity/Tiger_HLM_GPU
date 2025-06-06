@@ -1,27 +1,39 @@
-// src/solver/rk45.h
 #ifndef RK45_H
 #define RK45_H
 
 #include <cuda_runtime.h>
 
 /**
- * Templated GPU kernel: Batch‐mode RK45 integrator.
+ * GPU kernel that runs a single Dormand–Prince RK45 integrator on each thread.
  *
- * Each Model must satisfy:
- *   • static constexpr int    N_EQ         // number of equations (1…10)
- *   • static constexpr unsigned short UID  // unique model ID
- *   • struct Parameters { double initialStep, safety, minScale, maxScale; }
- *   • __device__ static void rhs(double t, const double* y, double* dydt, int n)
- *   • extern __constant__ Model::Parameters devParams;
+ * Each thread integrates one system of N_EQ coupled ODEs from t₀ to t_f.  The
+ * caller already sets Model::devParams (initial step, rtol, atol, etc.)
+ * in constant memory via setModelParameters<Model>().  This kernel:
  *
- * On launch, each thread integrates one N_EQ‐dimensional system.
+ *   1. Loads the initial state y[0..N_EQ-1] for system sys_id.
+ *   2. Computes a trial step h₀ exactly as SciPy does to rescale the first step.
+ *   3. Enters the main RK45 loop, performing adaptive steps until t ≥ t_f.
+ *   4. Fills out dense_all[sys_id, i, q] whenever a query time q ∈ (t, t_next]
+ *      falls inside the accepted step.
+ *   5. Writes the final state y(t_f) into y_final_all[sys_id, i].
+ *
+ * Template parameters:
+ *   Model::N_EQ       → number of equations per system
+ *   Model::rhs        → device RHS function for evaluating slopes
+ *   Model::devParams  → holds rtol, atol, initialStep, safety, minScale, maxScale
  *
  * Arguments:
- *   y0_all        [ num_systems × N_EQ ]  initial states
- *   y_final_all   [ num_systems × N_EQ ]  final states at t=tf
- *   query_times   [ num_queries ]         sorted query times in (t0,tf)
- *   dense_all     [ num_systems × N_EQ × num_queries ]  dense output
- *   num_systems, num_queries, t0, tf
+ *   y0_all       : pointer to host-copied array of length (num_systems × N_EQ),
+ *                  containing each system’s initial condition y(t₀).
+ *   y_final_all  : pointer to device buffer of the same size, to receive y(t_f).
+ *   query_times  : pointer to an array of length num_queries, sorted ascending,
+ *                  giving the times at which dense output is requested.
+ *   dense_all    : pointer to device buffer of size (num_systems × N_EQ × num_queries);
+ *                  for each (sys_id, i, q), we store y_i at query_times[q].
+ *   num_systems  : number of independent systems being integrated in parallel.
+ *   num_queries  : number of dense-output timestamps per system.
+ *   t0           : initial time of integration.
+ *   tf           : final time of integration.
  */
 template <class Model>
 __global__ void rk45_kernel_multi(
