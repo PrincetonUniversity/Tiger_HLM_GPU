@@ -13,7 +13,7 @@ root/
 │   ├── parameters.csv          # Spatially varying input parameters
 │   └── config.yaml             # config for input/output paths, model ID,
 │
-├── scripts/                    # (Optional) post‐processing or plotting scripts
+├── scripts/                    # post‐processing or plotting scripts
 │   └── …                       
 │
 └── src/
@@ -34,7 +34,7 @@ root/
     ├── solver/                 # Core RK45 solver components
     │   ├── rk45.h              # Low‐level kernel prototype (templated kernel)
     │   ├── rk45_kernel.cu      # Implements rk45_kernel_multi<Model> for each Model
-    │   ├── rk45_step_dense.cuh # Device‐side Dormand–Prince step (calls Model::rhs inside)
+    │   ├── rk45_step_dense.cuh # Device‐side Dormand–Prince step (calls Model::rhs inside) and dense output
     │   └── rk45_api.hpp        # Host‐side “run_rk45<T>” and setModelParameters<T>() wrapper
     │
     └── models/                 
