@@ -6,20 +6,23 @@ struct DummyModel {
     static constexpr int        N_EQ = 5;
 
     struct Parameters {
-        double initialStep;
-        double safety;
-        double minScale;
-        double maxScale;
+        double initialStep = 0.01;  // default if the user never sets it
+        double rtol        = 1e-6;  // default relative tolerance
+        double atol        = 1e-9;  // default absolute tolerance
+        double safety      = 0.9;   // default safety factor
+        double minScale    = 0.2;   // default minimum scale
+        double maxScale    = 10.0;  // default maximum scale
+
     };
 
-    __device__ static void rhs(double /*t*/, const double* y, double* dydt, int /*n*/) {
+    __host__ __device__ static void rhs(double /*t*/, const double* y, double* dydt, int /*n*/) {
         double H0 = y[0];
         double H1 = y[1];
-        double H2 = y[2];  // (unused but kept for size)
+        double H2 = y[2];  
         double H3 = y[3];
-        double H4 = y[4];  // (unused but kept for size)
+        double H4 = y[4];  
 
-        // … same RHS code as before …
+        // RHS code for the dummy model (same as the python version)
         double X0 = 1.0;
         double Y0 = 0.5 * H0;
         double X1 = 1.2;
@@ -28,13 +31,19 @@ struct DummyModel {
         double Y2 = 0.2;
         double Y3 = 0.3;
         double Y4 = 0.1;
-        double I2 = 0.6;
+        double I2 = 0.6 * H1;
         double I3 = 0.4 * H3;
-
+        
+        // Compute the derivatives
+        // dH0/dt = X0 - Y0
         dydt[0] = X0 - Y0;
+        // dH1/dt = X1 + Y0(H0) - X2 - Y1 - I2
         dydt[1] = X1 + Y0 - X2 - Y1 - I2;
+        // dH2/dt = X2(H1) - Y2
         dydt[2] = X2 - Y2;
+        // dH3/dt = I2(H1) - I3 - Y3
         dydt[3] = I2 - I3 - Y3;
+        // dH4/dt = I3(H3) - Y4
         dydt[4] = I3 - Y4;
     }
 };
