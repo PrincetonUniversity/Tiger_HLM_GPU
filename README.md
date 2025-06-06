@@ -48,7 +48,7 @@ root/
 Load the required CUDA toolkit using the following command:
 
 ```
-module load udatoolkit/12.9
+module load cudatoolkit/12.9
 ```
 
 ## Building & Running
