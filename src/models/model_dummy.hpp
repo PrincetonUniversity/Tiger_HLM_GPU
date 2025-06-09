@@ -1,3 +1,4 @@
+//models/model_dummy.hpp
 #pragma once
 #include "solver/rk45.h"
 
@@ -12,10 +13,9 @@ struct DummyModel {
         double safety      = 0.9;   // default safety factor
         double minScale    = 0.2;   // default minimum scale
         double maxScale    = 10.0;  // default maximum scale
-
     };
 
-    __host__ __device__ static void rhs(double /*t*/, const double* y, double* dydt, int /*n*/) {
+    __host__ __device__ static void rhs(double /*t*/, const double* y, double* dydt, int /*n*/, int /*sys*/) {
         double H0 = y[0];
         double H1 = y[1];
         double H2 = y[2];  
@@ -50,8 +50,14 @@ struct DummyModel {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Declare `devParams` in constant memory.  No definition/initializer here.
+// Definition lives in model_dummy_global.cu.
 // ─────────────────────────────────────────────────────────────────────────────
-extern __constant__ DummyModel::Parameters devParams;
+//extern __constant__ DummyModel::Parameters devParams;
+// only if USE_DUMMY_MODEL is defined do we pull in the extern:
+//extern __constant__ ActiveModel::Parameters devParams;
 
-// Declare the kernel function
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Declare the kernel function (optional, for test launches).
+// ─────────────────────────────────────────────────────────────────────────────
 extern __global__ void checkDevParamsKernel();
