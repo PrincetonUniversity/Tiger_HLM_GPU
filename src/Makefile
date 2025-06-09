@@ -1,111 +1,192 @@
 # --------------------------------------------------------------------------------------------------
-# Compiler flags (include solver/ and models/)
+# Compiler & directories
 # --------------------------------------------------------------------------------------------------
-DEBUG ?= 0
+NVCC      := nvcc
+OBJ_DIR   := obj
+BIN       := rk45_solver
+
+SOLVER_DIR := solver
+MODELS_DIR := models
+IO_DIR     := I_O
+
+# --------------------------------------------------------------------------------------------------
+# Choose which model to build: "dummy" or "204"
+# --------------------------------------------------------------------------------------------------
+MODEL ?= 204
+
+# --------------------------------------------------------------------------------------------------
+# Macros for both host and device compiles
+# --------------------------------------------------------------------------------------------------
+# Ensure the host parser (Clang/C++ front-end) also gets the same USE_MODEL_* define:
+HOST_CPPFLAGS := -DUSE_MODEL_$(MODEL) -I./$(IO_DIR)
+
+# --------------------------------------------------------------------------------------------------
+# Compiler flags (include solver/, models/, I_O/) and the model selector macro
+# --------------------------------------------------------------------------------------------------
+DEBUG   ?= 0
 VERBOSE ?= 0
 
-NVCCFLAGS := -std=c++14 -arch=sm_70 -rdc=true -Wno-deprecated-gpu-targets -I. -I./solver -I./models
-ifeq ($(DEBUG), 1)
+NVCCFLAGS := -std=c++17 -arch=sm_70 -rdc=true -Wno-deprecated-gpu-targets \
+             -I. -I./$(SOLVER_DIR) -I./$(MODELS_DIR) -I./$(IO_DIR)
+
+ifeq ($(DEBUG),1)
 	NVCCFLAGS += -g -G
 else
 	NVCCFLAGS += -O2
 endif
 
-# Ensure critical include paths are present
-ifeq (,$(findstring -I./models,$(NVCCFLAGS)))
-$(error "Include path for models/ is missing in NVCCFLAGS")
+# Pull in the right model switch for active_model.hpp
+ifeq ($(MODEL),dummy)
+	NVCCFLAGS += -DUSE_MODEL_DUMMY
+else ifeq ($(MODEL),204)
+	NVCCFLAGS += -DUSE_MODEL_204
+else
+	$(error Unknown MODEL '$(MODEL)'; valid: dummy or 204)
 endif
 
-ifeq (,$(findstring -I./solver,$(NVCCFLAGS)))
-$(error "Include path for solver/ is missing in NVCCFLAGS")
+# Ensure include paths
+ifeq (,$(findstring -I./$(MODELS_DIR),$(NVCCFLAGS)))
+	$(error "Include path for $(MODELS_DIR)/ is missing in NVCCFLAGS")
+endif
+ifeq (,$(findstring -I./$(SOLVER_DIR),$(NVCCFLAGS)))
+	$(error "Include path for $(SOLVER_DIR)/ is missing in NVCCFLAGS")
+endif
+ifeq (,$(findstring -I./$(IO_DIR),$(NVCCFLAGS)))
+	$(error "Include path for $(IO_DIR)/ is missing in NVCCFLAGS")
 endif
 
-# Verbose mode
+# Verbose?
 Q := @
-ifeq ($(VERBOSE), 1)
-Q :=
+ifeq ($(VERBOSE),1)
+	Q :=
 endif
 
 # --------------------------------------------------------------------------------------------------
-# Compiler
+# Sources
 # --------------------------------------------------------------------------------------------------
-NVCC := nvcc
-
-# --------------------------------------------------------------------------------------------------
-# Directories & Targets
-# --------------------------------------------------------------------------------------------------
-OBJ_DIR    := obj
-BIN        := rk45_solver
-
-SOLVER_DIR := solver
-MODELS_DIR := models
-
-# --------------------------------------------------------------------------------------------------
-# Source files
-# --------------------------------------------------------------------------------------------------
+# Common host sources
 SRCS_HOST := \
 	main.cpp \
-	model_registry.cpp
+	model_registry.cpp \
+	$(IO_DIR)/parameters_loader.cpp
 
+# For Model204 only: ETmethods & soiltemp
+ifeq ($(MODEL),204)
+	SRCS_HOST += \
+		$(MODELS_DIR)/ETmethods.cpp \
+		$(MODELS_DIR)/soiltemp.cpp
+endif
+
+# Device sources
 SRCS_DEVICE := \
 	$(SOLVER_DIR)/rk45_kernel.cu \
-	$(MODELS_DIR)/model_dummy_global.cu
+	$(SOLVER_DIR)/radau_kernel.cu
+
+# Pull in all per-model globals automatically:
+MODEL_GLOBAL_SRCS := $(wildcard $(MODELS_DIR)/*_global.cu)
+MODEL_GLOBAL_OBJS := $(patsubst $(MODELS_DIR)/%.cu,$(OBJ_DIR)/%.o,$(MODEL_GLOBAL_SRCS))
 
 # --------------------------------------------------------------------------------------------------
-# Object filenames
+# Objects
 # --------------------------------------------------------------------------------------------------
+# Host objects (flattened into obj/)
 OBJS_HOST := \
 	$(OBJ_DIR)/main.o \
-	$(OBJ_DIR)/model_registry.o
+	$(OBJ_DIR)/model_registry.o \
+	$(OBJ_DIR)/parameters_loader.o
 
+ifeq ($(MODEL),204)
+	OBJS_HOST += \
+		$(OBJ_DIR)/ETmethods.o \
+		$(OBJ_DIR)/soiltemp.o
+endif
+
+# Device objects (all compiled with -dc)
 OBJS_DEVICE := \
 	$(OBJ_DIR)/rk45_kernel.o \
-	$(OBJ_DIR)/model_dummy.o
+	$(OBJ_DIR)/radau_kernel.o \
+	$(MODEL_GLOBAL_OBJS)
+
+# Device-link object
+DEVICE_LINK_OBJ := $(OBJ_DIR)/device_link.o
 
 # --------------------------------------------------------------------------------------------------
 # Build rules
 # --------------------------------------------------------------------------------------------------
 all: $(BIN)
-	@echo "Build complete: $(BIN)"
+	@echo "Built $(BIN) [MODEL=$(MODEL)]"
 
-# Ensure obj/ directory exists
+# ensure obj directory
 $(OBJ_DIR):
 	@mkdir -p $(OBJ_DIR)
 
-# 1) Compile main.cpp with nvcc (it launches kernels via <<<>>>)
-$(OBJ_DIR)/main.o: main.cpp model_registry.hpp \
-	               $(SOLVER_DIR)/rk45.h $(SOLVER_DIR)/rk45_step_dense.cuh $(SOLVER_DIR)/rk45_api.hpp \
-	               $(MODELS_DIR)/model_dummy.hpp | $(OBJ_DIR)
-	$(Q)$(NVCC) $(NVCCFLAGS) -x cu -c main.cpp -o $@
+# ---------------------
+# Host compilation
+# ---------------------
+# .cpp → obj/%.o
+$(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
+	$(Q)$(NVCC) $(HOST_CPPFLAGS) $(NVCCFLAGS) -x cu -c $< -o $@
 
-# 2) Compile model_registry.cpp (contains cudaMemcpyToSymbol(devParams,…))
-$(OBJ_DIR)/model_registry.o: model_registry.cpp model_registry.hpp $(MODELS_DIR)/model_dummy.hpp | $(OBJ_DIR)
-	$(Q)$(NVCC) $(NVCCFLAGS) -x cu -c model_registry.cpp -o $@
+# I_O/parameters_loader.cpp → obj/parameters_loader.o
+$(OBJ_DIR)/parameters_loader.o: $(IO_DIR)/parameters_loader.cpp $(IO_DIR)/parameters_loader.hpp | $(OBJ_DIR)
+	$(Q)$(NVCC) $(HOST_CPPFLAGS) $(NVCCFLAGS) -x cu -c $< -o $@
 
-# 3) Compile rk45_kernel.cu (templated device code)
+# ETmethods.cpp → obj/ETmethods.o
+$(OBJ_DIR)/ETmethods.o: $(MODELS_DIR)/ETmethods.cpp $(MODELS_DIR)/ETmethods.hpp | $(OBJ_DIR)
+	$(Q)$(NVCC) $(HOST_CPPFLAGS) $(NVCCFLAGS) -dc -x cu -c $< -o $@
+
+# soiltemp.cpp → obj/soiltemp.o
+$(OBJ_DIR)/soiltemp.o: $(MODELS_DIR)/soiltemp.cpp $(MODELS_DIR)/soiltemp.hpp | $(OBJ_DIR)
+	$(Q)$(NVCC) $(HOST_CPPFLAGS) $(NVCCFLAGS) -dc -x cu -c $< -o $@
+
+# ---------------------
+# Device compilation
+# ---------------------
+# rk45_kernel.cu → obj/rk45_kernel.o
 $(OBJ_DIR)/rk45_kernel.o: $(SOLVER_DIR)/rk45_kernel.cu \
-	                     $(SOLVER_DIR)/rk45.h $(SOLVER_DIR)/rk45_step_dense.cuh $(SOLVER_DIR)/rk45_api.hpp \
-	                     $(MODELS_DIR)/model_dummy.hpp | $(OBJ_DIR)
-	$(Q)$(NVCC) $(NVCCFLAGS) -dc $(SOLVER_DIR)/rk45_kernel.cu -o $@
+                          $(SOLVER_DIR)/rk45.h \
+                          $(SOLVER_DIR)/rk45_step_dense.cuh \
+                          $(SOLVER_DIR)/event_detector.cuh \
+                          $(SOLVER_DIR)/small_lu.cuh \
+                          $(SOLVER_DIR)/radau_step_dense.cuh \
+                          $(SOLVER_DIR)/radau_kernel.cuh \
+                          $(SOLVER_DIR)/rk45_api.hpp \
+                          $(MODELS_DIR)/active_model.hpp | $(OBJ_DIR)
+	$(Q)$(NVCC) $(NVCCFLAGS) -dc $< -o $@
 
-# 4) Compile model_dummy_global.cu (the one definition of devParams)
-$(OBJ_DIR)/model_dummy.o: $(MODELS_DIR)/model_dummy_global.cu $(MODELS_DIR)/model_dummy.hpp | $(OBJ_DIR)
-	$(Q)$(NVCC) $(NVCCFLAGS) -x cu -c $(MODELS_DIR)/model_dummy_global.cu -o $@
+# radau_kernel.cu → obj/radau_kernel.o
+$(OBJ_DIR)/radau_kernel.o: $(SOLVER_DIR)/radau_kernel.cu \
+                           $(SOLVER_DIR)/radau_kernel.cuh \
+                           $(SOLVER_DIR)/radau_step_dense.cuh \
+                           $(SOLVER_DIR)/small_lu.cuh \
+                           $(SOLVER_DIR)/event_detector.cuh \
+                           $(MODELS_DIR)/active_model.hpp | $(OBJ_DIR)
+	$(Q)$(NVCC) $(NVCCFLAGS) -dc $< -o $@
 
-# 5) Link everything
-$(BIN): $(OBJS_HOST) $(OBJS_DEVICE)
-	$(Q)$(NVCC) $(NVCCFLAGS) $(OBJS_DEVICE) $(OBJS_HOST) -o $(BIN)
+# model_*_global.cu → obj/model_*_global.o (auto via wildcard)
+$(OBJ_DIR)/%_global.o: $(MODELS_DIR)/%_global.cu $(MODELS_DIR)/active_model.hpp | $(OBJ_DIR)
+	$(Q)$(NVCC) $(NVCCFLAGS) -dc -x cu -c $< -o $@
 
-# 6) Clean up
+# ---------------------
+# Device-link and final link
+# ---------------------
+# Stitch all -dc objects into one fatbinary
+$(DEVICE_LINK_OBJ): $(OBJS_DEVICE)
+	$(Q)$(NVCC) $(NVCCFLAGS) -dlink $^ -o $@
+
+# Final link: include device_link.o
+$(BIN): $(OBJS_HOST) $(OBJS_DEVICE) $(DEVICE_LINK_OBJ)
+	$(Q)$(NVCC) $(NVCCFLAGS) $^ -o $@
+
 clean:
 	$(Q)rm -rf $(OBJ_DIR)/*.o $(BIN)
 
 distclean: clean
 	$(Q)rm -rf $(OBJ_DIR)/*.d
 
-# Check for CUDA Toolkit installation
+# Sanity check: nvcc must exist
 ifeq ($(shell which nvcc),)
-$(error "CUDA Toolkit (nvcc) not found. Please install it or add it to your PATH. Visit https://developer.nvidia.com/cuda-toolkit for installation instructions.")
+	$(error "nvcc not found. Please install CUDA Toolkit or add it to PATH.")
 endif
 
 .PHONY: all clean distclean
