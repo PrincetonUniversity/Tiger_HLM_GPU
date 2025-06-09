@@ -5,9 +5,7 @@
 #include <string>
 
 /**
- * (Optional) A stub for loading forcing data from CSV or NetCDF.
+ * Loading forcing data from NetCDF and the map associated with the forcing data.
  * For the dummy model, we are not using any forcing, so these functions can be left unimplemented.
  */
 
-bool loadCsvForcing(const std::string& filename, std::vector<double>& times, std::vector<double>& values);
-bool loadNetcdfForcing(const std::string& filename, std::vector<double>& times, std::vector<double>& values);
