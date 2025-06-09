@@ -1,3 +1,4 @@
+//src/solver/rk45_step_dense.cuh
 #pragma once
 
 #include <math.h>
@@ -26,7 +27,7 @@
  *   atol        : absolute tolerance (scalar) for error control
  *   error_norm  : address of a double to receive the ∞‐norm of the local error estimate
  *   k           : 2D array k[0..6][0..N_EQ−1], where:
- *                   • k[0] is already filled by the caller via Model::rhs(t, y, k[0], N_EQ)
+ *                   • k[0] is already filled by the caller via Model::rhs(t, y, k[0], N_EQ, sys_id, d_sp)
  *                   • this function will compute k[1]..k[6] internally
  */
 template <class Model>
@@ -39,7 +40,8 @@ __device__ void rk45_step(
     double rtol,                         // relative tolerance (scalar)
     double atol,                         // absolute tolerance (scalar)
     double* error_norm,                  // ∞-norm error estimate
-    double k[7][Model::N_EQ]             // stage slopes (output)
+    double k[7][Model::N_EQ],             // stage slopes (output)
+    int sys_id                           // passing stream ID here
 ) {
     constexpr int N_EQ = Model::N_EQ;
 
@@ -96,7 +98,7 @@ __device__ void rk45_step(
             y_temp[i] = acc;
         }
         // Evaluate the RHS at t + c[s]*h, storing the slope into k[s]
-        Model::rhs(t + c[s] * h, y_temp, k[s], N_EQ);
+        Model::rhs(t + c[s] * h, y_temp, k[s], N_EQ, sys_id, d_sp);
     }
 
     // ─── Stage 3: Build y_out (5th‐order) ───

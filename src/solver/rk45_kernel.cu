@@ -1,185 +1,189 @@
+//solvers/rk45_kernel.cu
 #include <cstdio>
 #include <cuda_runtime.h>
 #include "rk45.h"
 #include "rk45_step_dense.cuh"
-#include "models/model_dummy.hpp"  // For DummyModel::N_EQ and devParams
-
+#include "event_detector.cuh"    // norm_inf, norm_inf_diff, SLOPE_JUMP_THRESH, MIN_STEP_FRACTION
+#include "small_lu.cuh"          // small_matrix_LU_solve
+#include "radau_step_dense.cuh"  // radau_step, radau_dense
+#include "models/active_model.hpp"     // defines ActiveModel and extern __constant__ devParams
+#include "models/model_204.hpp"   // brings in Model204
 // -----------------------------------------------------------------------------
-// Implementation of rk45_kernel_multi defined in rk45.h
+// Single-kernel that does RK45, then (per-thread) falls back to Radau if needed.
 // -----------------------------------------------------------------------------
-template <class Model>
-__global__ void rk45_kernel_multi(
-    double* y0_all,        // [num_systems × Model::N_EQ]: initial states
-    double* y_final_all,   // [num_systems × Model::N_EQ]: final states
-    double* query_times,   // [num_queries]: sorted dense-output times
-    double* dense_all,     // [num_systems × Model::N_EQ × num_queries]: dense outputs
-    int     num_systems,   // total number of systems
-    int     num_queries,   // total number of query times
-    double  t0,            // start time
-    double  tf             // end time
+template <class ActiveModel>
+__global__ void rk45_then_radau_multi(
+    double* y0_all,       // [num_systems × N_EQ]
+    double* y_final_all,  // [num_systems × N_EQ]
+    double* query_times,  // [num_queries]
+    double* dense_all,    // [num_systems × N_EQ × num_queries]
+    int     num_systems,
+    int     num_queries,
+    double  t0,
+    double  tf,
+    const SpatialParams* __restrict__ d_sp
 ) {
-    constexpr int N_EQ = Model::N_EQ;
+    constexpr int N_EQ = ActiveModel::N_EQ;
 
-    // Identify which system this thread integrates
-    int sys_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (sys_id >= num_systems) return;
+    int sys = blockIdx.x*blockDim.x + threadIdx.x;
+    if (sys >= num_systems) return;
 
-    // ─── DEBUG CHECK: only print once from sys_id == 0 ───
-    // if (sys_id == 0) {
-    //     printf("KERNEL: num_systems = %d, num_queries = %d\n", 
-    //            num_systems, num_queries);
-    //     if (num_queries > 0) {
-    //         // Print the first and last query_time to confirm we copied the vector correctly:
-    //         printf("KERNEL: query_times[0] = %f, query_times[%d] = %f\n",
-    //                query_times[0], num_queries-1, query_times[num_queries-1]);
-    //     }
-    // }
-    // // ────────────────────────────────────────────────────────
+    // solver parameters
+    double rtol = devParams.rtol;
+    double atol = devParams.atol;
+    double h    = devParams.initialStep;
+    double t    = t0;
 
-    // Load solver tolerances and initial step from constant memory
-    double my_rtol = devParams.rtol; // default is 1e-6
-    double my_atol = devParams.atol; // default is 1e-9
-    double h = devParams.initialStep; // default is 0.01
-
-    // ─── Integration state ───
-    double t = t0;
-    
-    // Allocate registers for the current state, next state, and stage slopes
+    // state buffers
     double y[N_EQ], y_next[N_EQ];
-    double k[7][N_EQ];
-    double error_norm = 0.0;
+    double k45[7][N_EQ];
+    double radau_k[3][N_EQ];   // Radau‐IIA has 3 stages → 3×N_EQ
+    double err;
 
-    // Load initial condition y0 for this system
-    for (int i = 0; i < N_EQ; ++i) {
-        y[i] = y0_all[sys_id * N_EQ + i];
-    }
+    // load initial y
+    for(int i=0;i<N_EQ;++i) y[i] = y0_all[sys*N_EQ + i];
 
-    // ─── Trial step to compute SciPy-style first step size ───
-    {
-        // Compute initial slope k_trial[0] = f(t0, y0)
-        double y_trial[N_EQ];
-        double k_trial[7][N_EQ];
-        Model::rhs(t, y, k_trial[0], N_EQ);
+    int next_q = 0;
+    int reject_count = 0;
+    bool stiff = false;
 
-        // Take one RK45 step using the current h to get y_trial and trial_error_norm
-        double trial_error_norm = 0.0;
-        rk45_step<Model>(t, y, y_trial, N_EQ, h, my_rtol, my_atol, &trial_error_norm, k_trial);
-
-        // Compute the infinity-norm of the scaled error exactly as SciPy:
-        //     y_err_i = h * Σ_{s=0..6} (b[s] - b_alt[s]) * k_trial[s][i]
-        //     tol_i   = my_atol + my_rtol * max( |y[i]|, |y_trial[i]| )
-        //     ratio_i = |y_err_i| / tol_i, then max over i
-        double max_ratio = 0.0;
-        for (int i = 0; i < N_EQ; ++i) {
-            // Assemble the 5th–4th order local error for component i
-            double y_err_i = 0.0;
-            for (int s = 0; s < 7; ++s) {
-                // Coefficients must exactly match those in rk45_step
-                static constexpr double b[7] = {
-                    35.0/384.0,      0.0,
-                    500.0/1113.0, 125.0/192.0,
-                    -2187.0/6784.0, 11.0/84.0,
-                    0.0
-                };
-                static constexpr double b_alt[7] = {
-                    5179.0/57600.0, 0.0,
-                    7571.0/16695.0, 393.0/640.0,
-                    -92097.0/339200.0, 187.0/2100.0, 1.0/40.0
-                };
-                y_err_i += h * ((b[s] - b_alt[s]) * k_trial[s][i]);
-            }
-            double ymax   = fmax(fabs(y[i]), fabs(y_trial[i]));
-            double tol_i  = my_atol + my_rtol * ymax;
-            double ratio  = fabs(y_err_i / tol_i);
-            if (ratio > max_ratio) {
-                max_ratio = ratio;
-            }
-        }
-
-        // Rescale h exactly as SciPy: h₀ = safety * h * (max_ratio)^(-1/5)
-        // then bound h₀ to lie within [minScale * h, maxScale * h]
-        double factor = devParams.safety * pow(max_ratio + 1e-16, -1.0/5.0);
-        h = h * fmin(fmax(factor, devParams.minScale), devParams.maxScale);
-
-        // Discard trial results and reset t, y to (t0, y0)
-        t = t0;
-        for (int i = 0; i < N_EQ; ++i) {
-            y[i] = y0_all[sys_id * N_EQ + i];
-        }
-    }
-    
-
-    // Index of the next query time to process
-    int next_q_idx = 0;
-
-    // ─── Main adaptive RK45 loop ───
-    while (t < tf) {
-        // If the next step would overshoot tf, shorten it
+    // ─── 1) Explicit RK45 phase ───
+    while(t < tf && !stiff) {
         if (t + h > tf) h = tf - t;
 
-        // Compute the first slope k[0] = f(t,y) explicitly 
-        Model::rhs(t, y, k[0], N_EQ);
+        // compute k45[0]
+        //ActiveModel::rhs(t, y, k45[0], N_EQ); //without sys
+        ActiveModel::rhs(t, y, k45[0], N_EQ, sys, d_sp);
+        // one RK45 step
+        rk45_step<ActiveModel>(t, y, y_next, N_EQ, h, rtol, atol, &err, k45, sys);
 
-        // Take exactly one RK45 step (fills k[0..6], y_next, error_norm)
-        rk45_step<Model>(t, y, y_next, N_EQ, h, my_rtol, my_atol, &error_norm, k); 
+        if (err <= 1.0) {
+            // accepted
+            reject_count = 0;
 
-        if (error_norm <= 1.0) {
-            // Accept step
-            double t_next = t + h;
-
-            // Dense output for queries in (t, t_next]
-            while (next_q_idx < num_queries && query_times[next_q_idx] <= t_next) {
-            double tq = query_times[next_q_idx];
-            if (tq > t) {
-                // Compute normalized fraction θ = (tq - t)/h
-                double theta = (tq - t)/h;
-                double y_dense[N_EQ];
-
-                // Evaluate the 5th-order interpolant at θ
-                rk45_dense<Model>(y, k, N_EQ, h, theta, y_dense);
-
-                // Store each component y_dense[comp] into dense_all
-                for (int comp = 0; comp < N_EQ; ++comp) {
-                    int flat_index = 
-                        sys_id * (N_EQ * num_queries)   // offset to system sys_id
-                    + comp   * (num_queries)            // offset to component comp
-                    + next_q_idx;                       // offset to the qth query index
-                    dense_all[flat_index] = y_dense[comp];
+            // ─── Event detection / slope‐jump would go here ───
+            // Compare k45-stage 0 vs. stage 1 to see if slope changes too abruptly !!!
+            {
+                double jump = norm_inf_diff(k45[0], k45[1], N_EQ);
+                if (jump > SLOPE_JUMP_THRESH) {
+                    // detect kink: halve the step and retry
+                    h *= 0.5;
+                    // also clamp h to a minimum
+                    h = fmax(h, devParams.initialStep * MIN_STEP_FRACTION);
+                    continue;  // go back and re-attempt the step
                 }
             }
-            next_q_idx++;
+
+            // ─── Dense output for RK45 queries ───
+            double t1 = t + h;
+            while(next_q < num_queries && query_times[next_q] <= t1) {
+                double tq = query_times[next_q];
+                if (tq > t) {
+                    double th = (tq - t)/h;
+                    double yd[N_EQ];
+                    rk45_dense<ActiveModel>(y, k45, N_EQ, h, th, yd);
+                    for(int c=0;c<N_EQ;++c){
+                        int idx = sys*(N_EQ*num_queries) + c*num_queries + next_q;
+                        dense_all[idx] = yd[c];
+                    }
+                }
+                ++next_q;
             }
 
-             // Advance state: y ← y_next, t ← t_next
-            for (int i = 0; i < N_EQ; ++i) {
-                y[i] = y_next[i];
-            }
-            t = t_next;
+            // advance
+            for(int i=0;i<N_EQ;++i) y[i] = y_next[i];
+            t = t1;
 
-            // Rescale h: h ← h * clamp( safety * (1 / error_norm)^(1/5) , minScale, maxScale )
-            double factor = devParams.safety * pow(1.0 / (error_norm + 1e-16), 0.2);
-            h *= fmin(fmax(factor, devParams.minScale), devParams.maxScale);
+            // rescale h
+            double fac = devParams.safety * pow(1.0/(err + 1e-16), 0.2);
+            h *= fmin(fmax(fac, devParams.minScale), devParams.maxScale);
+
         } else {
-            // Reject the step
-            // shrink h by at most a factor of 1.0, then clamp, and retry ───────
-            double factor = devParams.safety * pow(1.0 / (error_norm + 1e-16), 0.2);
-            factor = fmin(factor, 1.0);
-            factor = fmin(fmax(factor, devParams.minScale), devParams.maxScale);
-            h *= factor;
+            // rejected
+            ++reject_count;
+            double fac = devParams.safety * pow(1.0/(err + 1e-16), 0.2);
+            fac = fmin(fac, 1.0);
+            fac = fmin(fmax(fac, devParams.minScale), devParams.maxScale);
+            h *= fac;
 
-            // Do not advance t or y in else; the loop will repeat with the smaller h
+            // detect stiffness
+            if (reject_count > 5 || h < (tf - t0)*MIN_STEP_FRACTION) {
+                stiff = true;
+            }
         }
     }
 
-    // Write final state y(t_f) into y_final_all
-    for (int i = 0; i < N_EQ; ++i) {
-        y_final_all[sys_id * N_EQ + i] = y[i];
+    // ─── 2) Implicit Radau phase (if needed) ───
+    if (stiff && t < tf) {
+        // bring forward the same y[], next_q, h, t
+        double y_r[N_EQ], y_rnext[N_EQ];
+        for(int i=0;i<N_EQ;++i) y_r[i] = y[i];
+
+        while(t < tf) {
+            if (t + h > tf) h = tf - t;
+
+            // one Radau IIA step
+            radau_step<ActiveModel>(t, y_r, y_rnext, N_EQ, h, rtol, atol, &err, radau_k, sys);
+
+            // ─── Dense‐output for leftover queries ───
+            double t1 = t + h;
+            while(next_q < num_queries && query_times[next_q] <= t1) {
+                double tq = query_times[next_q];
+                if (tq > t) {
+                    double th = (tq - t)/h;
+                    double yd[N_EQ];
+                    // <<< The only change: no cast, just pass radau_k directly >>>
+                    radau_dense<ActiveModel>(y_r, radau_k, N_EQ, h, th, yd);
+                    for(int c=0;c<N_EQ;++c) {
+                        int idx = sys*(N_EQ*num_queries) + c*num_queries + next_q;
+                        dense_all[idx] = yd[c];
+                    }
+                }
+                ++next_q;
+            }
+
+            // accept
+            for(int i=0;i<N_EQ;++i) y_r[i] = y_rnext[i];
+            t = t1;
+
+            // stiff step‐size control
+            double fac = devParams.safety * pow(1.0/(err + 1e-16), 1.0/5.0);
+            h *= fmin(fmax(fac, devParams.minScale), devParams.maxScale);
+        }
+
+        // copy final
+        for(int i=0;i<N_EQ;++i){
+            y_final_all[sys*N_EQ + i] = y_r[i];
+        }
+        return;
+    }
+
+    // ─── 3) If never stiff or after RK45 finishes ───
+    for(int i=0;i<N_EQ;++i){
+        y_final_all[sys*N_EQ + i] = y[i];
     }
 }
 
 // ----------------------------------------------------------------------------
-// Explicit instantiation of rk45_kernel_multi for dummy model
+// Explicit instantiation for the chosen ActiveModel
 // ----------------------------------------------------------------------------
-template __global__ void rk45_kernel_multi<DummyModel>(
-    double*, double*, double*, double*, int, int, double, double
-);
+ template __global__ void rk45_then_radau_multi<Model204>(
+     double* y0_all,
+     double* y_final_all,
+     double* query_times,
+     double* dense_all,
+     int     num_systems,
+     int     num_queries,
+     double  t0,
+     double  tf,
+     const SpatialParams* d_sp
+ );
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXPLICIT INSTANTIATION for Model204
+// ─────────────────────────────────────────────────────────────────────────────
+// template __global__ void rk45_kernel_multi<Model204>(
+//     double* y0, double* y, double* t, double* err,
+//     int system_size, int num_systems,
+//     double t0, double dt
+// );
