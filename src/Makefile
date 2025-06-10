@@ -20,18 +20,23 @@ BIN         := rk45_solver
 DEBUG   ?= 0
 VERBOSE ?= 0
 
+
+# Try NETCDFDIR first, fallback to NETCDF_ROOT
+NETCDF_PATH="${NETCDFDIR:-$NETCDF_ROOT}/include"
+
 # Include paths
-HOST_INCLUDES   := -I. -I$(IO_DIR) -I$(SOLVER_DIR) -I$(MODELS_DIR)
+HOST_INCLUDES   := -I. -I$(IO_DIR) -I$(SOLVER_DIR) -I$(MODELS_DIR) -I${NETCDF_PATH}
 DEVICE_INCLUDES := -I. -I$(SOLVER_DIR) -I$(MODELS_DIR) -I$(IO_DIR)
 
 # Compiler flags
 NVCCFLAGS := -std=c++17 -rdc=true \
   -gencode arch=compute_80,code=compute_80 \
   -gencode arch=compute_80,code=sm_80 \
-  $(DEVICE_INCLUDES) -DUSE_MODEL_204 -Wno-deprecated-gpu-targets
+  $(DEVICE_INCLUDES) -DUSE_MODEL_204 -Wno-deprecated-gpu-targets \
+  -L${NETCDF_PATH}/lib64 -lnetcdf_c++4 -lnetcdf 
 
 
-HOSTFLAGS := -std=c++17 $(HOST_INCLUDES) -DUSE_MODEL_204
+HOSTFLAGS := -std=c++17 $(HOST_INCLUDES) -DUSE_MODEL_204 
 
 ifeq ($(DEBUG),1)
   NVCCFLAGS += -g -G -O0
@@ -50,7 +55,8 @@ endif
 # ─────────────────────────────────────────────────────────────────────────────
 SRC_MAIN_CU  := main.cpp
 SRC_HOST_CPP := model_registry.cpp
-SRC_IO_CPP   := $(IO_DIR)/parameters_loader.cpp
+SRC_IO_CPP   := $(IO_DIR)/parameters_loader.cpp \
+                $(IO_DIR)/output_netcdf.cpp
 
 # Temporarily disable ETmethods.cpp and soiltemp.cpp until host-device attributes are fixed
 # SRC_UTIL_CPP := $(MODELS_DIR)/ETmethods.cpp $(MODELS_DIR)/soiltemp.cpp

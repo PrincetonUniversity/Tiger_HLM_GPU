@@ -17,6 +17,7 @@
 #include "radau_step_dense.cuh"      // device kernels for Radau‐IIA step + dense‐output
 //#include "models/active_model.hpp"   // defines Model204 alias & __constant__ devParams
 #include "parameters_loader.hpp"     // CSV loader for SpatialParams
+#include "output_netcdf.hpp"         //series output to netcdf 
 #include "models/model_204.hpp"      // brings in SpatialParams
 #include "stream.hpp"                // Stream<Model> wrapper (id, next_id, SpatialParams, y0)
 # include "radau_kernel.cuh"       // Radau‐only kernel for Model204
@@ -409,6 +410,40 @@ int main() {
         std::printf("\n");
     }
 
+
+    // ———————————————————————————————— 
+    // ───────── Write to netcdf  ─────────
+    std::string dense_filename = "dense_example.nc";
+    std::string final_filename = "final_example.nc";
+    int compression_level = 4;
+
+    int N_EQ = Model204::N_EQ;
+
+    // !!!! NEED TO CHANGE TO ACCESS ACTUAL ID AND STATE INDEXES !!!
+    std::vector<int> linkid_vals(num_systems);
+    std::vector<int> state_vals(N_EQ);
+    for (int s = 0; s < num_systems; ++s) linkid_vals[s] = s;
+    for (int v = 0; v < N_EQ; ++v) state_vals[v] = v;
+
+    // Write dense (3D)
+    write_dense_netcdf(dense_filename,
+                       h_dense.data(),
+                       h_query_times.data(),
+                       linkid_vals.data(),
+                       state_vals.data(),
+                       num_queries,
+                       num_systems,
+                       N_EQ,
+                       compression_level);
+
+    // Write only the final time step (2D output)
+    write_final_netcdf(final_filename,
+                       h_y_final.data(),
+                       linkid_vals.data(),
+                       state_vals.data(),
+                       num_systems,
+                       N_EQ,
+                       compression_level);
 
 
     return 0;
