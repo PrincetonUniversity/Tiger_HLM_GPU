@@ -1,75 +1,74 @@
-# simulation.yaml
-
-# ── 1) Which Model ─────────────────────────────────────────────────────────────
 model:
-  uid: 204                        # Model UID
-  name: Model204                  # Optional human‐readable name
+  uid: 200
+  name: "200"
 
-# ── 2) Simulation Time Span ───────────────────────────────────────────────────
-time:
-  start: "2021-01-01T00:00:00"    # ISO8601 for t=0
-  end:   "2021-10-01T00:00:00"     # for output control only
+time_period:
+  start: "2024-01-01 00:00:00"
+  end: "2025-01-01 00:00:00"
 
-# ── 3) Initial Conditions ─────────────────────────────────────────────────────
 initial:
-  mode: hot                       # "cold" or "hot"
-  file: "inits/inicond_204.uini"  # only if mode: hot
+  mode: "cold"    # options: "cold" or "hot"
+  file: "./hot"      # file for hot start, only required if mode is "hot"
 
-# ── 4) Global Parameters ──────────────────────────────────────────────────────
-#    leave empty if your model doesn’t use any globals
-global_params:
-  - name: foo
-    value: 0.0
+parameters:    # spatially varied parameters
+  path: "data/parameters/"
+  spatially_varying_file: "small_test.csv"
+  constant_parameters_index: [6, 8, 10]
+  constant_parameters_values: [0.1, 0.5, 1.2]    
 
-# ── 5) Local (per‐link) Parameters ─────────────────────────────────────────────
-local_params:
-  file: "params/stream_params.csv"
-  columns:
-    stream_id:      0
-    next_stream_id: 1
-    params_start:   2
-    num_params:    15
+forcings:    
+  type: "folder_nc"    # P.S., not sure what this means, will clarify with Manjaree
+  path: "data/forcing/"
+  time_chunking: true    # whether to chunk the time dimension
+  variables:
+    - name: "precipitation"
+      file: "pr_hourly_era5land_2019.nc"
+      var_name: "pr"    # var name in the NetCDF file
+      time_resolution: "hourly"    # four options: "minute", "hourly", "daily", "monthly"
+      time_chunk_size: 24
+      required: true
+    - name: "temperature"
+      file: "t2m_daily_avg_era5land_2019.nc"
+      var_name: "t2m"
+      time_resolution: "daily"
+      time_chunk_size: 1
+      required: true
+    # leaving space for other variables in the future
 
-# ── 6) Forcings ────────────────────────────────────────────────────────────────
-forcings:
-  type:    folder_nc
-  path:    "/data/forcings/2021"
-  lookup:  "forcings_lookup.csv"
-  vars:
-    precipitation: "PRCP"
-    temperature:   "Tair"
-    # doy is computed internally from time.start and t
+forcing_mappings:
+  path: "data/forcing/mappings/"
+  variables:
+    - name: "precipitation"
+      file: "pr_lookup.csv"
+    - name: "temperature"
+      file: "t2m_lookup.csv"
+    - name: "wind"
+      file: "wind_lookup.csv"
+     
 
-# ── 7) Outputs ─────────────────────────────────────────────────────────────────
-output:
-  print_interval: "1h"           # e.g. "15m", "1h", "1d"
-  # omit “states:” to mean “all model states”
-  states:                        # explicitly list if you want only a subset
-    - 0   # snow
-    - 1   # static
-    - 2   # surface
-    - 3   # grav
-    - 4   # aquifer
+output:    # maybe many things are missing here
+  print_interval: 60    # in mins
+  states: [1, 2, 3, 4, 5]
+  output_path: "data/output/"
+  output_file: "output.nc"
+  final_output: true
+  final_output_file: "final_output.nc"
 
-# ── 8) RK45 Solver Settings ───────────────────────────────────────────────────
-solver:
-  method: RK45
-  tolerances:
-    rtol:      1e-6
-    atol:      1e-9
-    safety:    0.9
-    min_scale: 0.2
-    max_scale: 10.0
-  initial_step: null             # null → auto‐scaled
+solver:    # solver configuration
+  rtol: 1.0e-6
+  atol: 1.0e-8
+  safety: 0.9
+  min_scale: 0.1
+  max_scale: 10.0
+  override_tolerances: false
+  initial_step: 1.0e-3
+  override_initial_step: false
 
-# ── 9) Parallel‐run Buffers ────────────────────────────────────────────────────
 mpi:
-  step_storage:     30           # max RK steps to keep per link
-  transfer_buffer: 10            # max steps sent between procs
-  # discontinuity buffering not used; omit or set to 0
-  discontinuity_buf: 0
+  step_storage: 1000
+  transfer_buffer: 512
+  discontinuity_buf: 256
 
-# ── 10) Miscellaneous Flags ──────────────────────────────────────────────────
 flags:
-  uses_dam:     false
+  uses_dam: false
   convert_area: false

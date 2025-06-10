@@ -4,9 +4,12 @@
 #include <array>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <utility>    // for std::tie when unpacking tuples
 #include <cmath>      // for std::sqrt, std::pow, std::fabs
 #include <algorithm>  // for std::max, std::fmin, std::fmax
+
+#include "I_O/config_loader.hpp"         // loadConfig
 
 #include "rk45.h"                    // core RK45 solver interface (host‐side API)
 #include "model_registry.hpp"        // setModelParameters<Model204>()
@@ -117,6 +120,27 @@ int main() {
    
 
     using namespace rk45_api;
+
+    // ───────── Load config from yaml ─────────
+    ModelConfig config = ConfigLoader::loadConfig("../data/config.yaml");
+    // print config info for demonstration: model and parameters
+    std::cout << "=== Loaded Configuration ===" << std::endl;
+
+    std::cout << " -- model -- " << std::endl;
+    std::cout << "Model UID: " << config.model_uid << std::endl;
+    std::cout << "Model Name: " << config.model_name << std::endl;
+
+    std::cout << " -- parameters -- " << std::endl;
+    std::cout << "Parameters Path: " << config.parameters_path << std::endl;
+    std::cout << "Spatially Varying File: " << config.spatially_varying_file << std::endl;
+    std::cout << "Constant Parameters Index: " << config.constant_parameters_index.size() << std::endl;
+    for (const auto& index : config.constant_parameters_index) {
+        std::cout << "  - Index: " << index << std::endl;
+    }
+    std::cout << "Constant Parameters Values: " << config.constant_parameters_values.size() << std::endl;
+    for (const auto& value : config.constant_parameters_values) {
+        std::cout << "  - Value: " << value << std::endl;
+    }
 
     // ───────── 0) load per‐stream spatial parameters ─────────
     auto spatialParams = loadSpatialParams("../data/small_test.csv");
