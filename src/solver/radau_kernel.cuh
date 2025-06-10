@@ -5,14 +5,15 @@
 // (parallel to rk45_kernel_multi).
 // Must match the signature in radau_kernel.cu.
 
-template <class ActiveModel>
+template <class Model204>
 __global__ void radau_kernel_multi(
-    double* y0_all,        // [num_systems × ActiveModel::N_EQ]: initial states
-    double* y_final_all,   // [num_systems × ActiveModel::N_EQ]: final states
+    double* y0_all,        // [num_systems × Model204::N_EQ]: initial states
+    double* y_final_all,   // [num_systems × Model204::N_EQ]: final states
     double* query_times,   // [num_queries]: sorted dense-output times
-    double* dense_all,     // [num_systems × ActiveModel::N_EQ × num_queries]: dense outputs
+    double* dense_all,     // [num_systems × Model204::N_EQ × num_queries]: dense outputs
     int     num_systems,   // total number of systems
     int     num_queries,   // total number of query times
     double  t0,            // start time
-    double  tf             // end time
+    double  tf,             // end time
+    const typename Model204::SP_TYPE* d_sp 
 );

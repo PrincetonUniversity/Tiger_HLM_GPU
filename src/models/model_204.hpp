@@ -1,4 +1,3 @@
-// models/model_204.hpp
 #pragma once
 
 #include "solver/rk45.h"
@@ -12,19 +11,14 @@ using ETMethods::HamonPET;
 using ETMethods::ETactual;
 using SoilTemp::soiltemp;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Device‐constant pointer to the array we copy your CSV into.  Definition lives
-// in model_204_global.cu (as “__constant__ SpatialParams* devSpatialParamsPtr”).
-// ─────────────────────────────────────────────────────────────────────────────
-extern __constant__ SpatialParams* devSpatialParamsPtr;
-
 /// Model204: 5‐equation “snow, static, surface, grav, aquifer” runoff model.
 struct Model204
 {
+    using SP_TYPE = SpatialParams;    ///< alias for the spatial‐params struct
     static constexpr unsigned short UID = 204;
-    static constexpr int N_EQ = 5; // h_snow, h_static, h_surface, h_grav, h_aquifer
+    static constexpr int N_EQ = 5;    ///< number of equations
 
-    /// RK45‐tolerance parameters (populated by model_registry)
+    /// RK45‐tolerance parameters (populated at runtime via model_registry)
     struct Parameters
     {
         double initialStep = 0.01;
@@ -44,7 +38,7 @@ struct Model204
      * y[3] = h_grav
      * y[4] = h_aquifer
      *
-     * Now pulls per‐stream parameters from devSpatialParamsPtr[sys].
+     * Now pulls per‐stream parameters from sp_ptr[sys].
      */
     __host__ __device__
     static void rhs(double t,
@@ -52,13 +46,9 @@ struct Model204
                     double *dydt,
                     int /*n*/,
                     int sys,   // which stream index we’re on
-                    const SpatialParams* sp_ptr)  // pointer passed in from kernel
+                    const SpatialParams* sp_ptr)
     {
-        // grab the params for this thread’s stream via the constant-pointer:
-        //const SpatialParams &P = devSpatialParamsPtr[sys];
-        
         const SpatialParams &P = sp_ptr[sys];
-
 
         // — unpack the state vector y —
         double h_snow = y[0];
@@ -66,20 +56,8 @@ struct Model204
         double h_surf = y[2];
         double h_grav = y[3];
         double h_aq   = y[4];
-        
-        // — stub spatial parameters —
-        // double c1     = 0.001 / 60.0;
-        // double infil  = 0.0001 * c1;
-        // double perco  = 0.00005 * c1;
-        // double Hu     = 0.5;     // [m]
-        // double lat    = 45.0;    // [°]
-        // double sw     = 0.2, ss = 0.8;
-        // double n_mann = 0.03, slope = 0.05;
-        // double L      = 1000.0, A_h = 1e5;
-        // double alpha3 = 2 * 24 * 60, alpha4 = 5 * 24 * 60;
-        // double melt_f = 0.00001, temp_thr = 0.0;
 
-        // — replaced stub spatial parameters by real ones: —
+        // — real spatial parameters —
         double c1     = P.c1;
         double infil  = P.infil;
         double perco  = P.perco;
@@ -91,12 +69,11 @@ struct Model204
         double alpha3 = P.alpha3, alpha4 = P.alpha4;
         double melt_f = P.melt_f,  temp_thr = P.temp_thr;
 
-        // — stub forcings (for now, in future change with the inputs from forcings_loader files) —
+        // — stub forcings (for now) —
         double rainfall    = 0.001;        // [m/min]
         double temperature = 1.0;          // [°C]
-        // add code to calculate the day of year based on the start datetime
         double doy         = 1.0 + t/1440; // day‐of‐year 
-        
+
         // 1) Snow
         double snowmelt = (temperature >= temp_thr)
                               ? fmin(h_snow, temperature * melt_f)
@@ -105,32 +82,36 @@ struct Model204
         dydt[0]         = rainfall - snowmelt;
 
         // 2) Static
-        double x2 = fmax(0.0, x1 + h_stat - Hu);
-        double d1 = x1 - x2;
-        double e_pot = 0.1 * temperature;
-        double Emax  = fmin(e_pot, h_stat);
-        double s     = h_stat / Hu;
-        double out1  = s * Emax;
-        dydt[1] = d1 - out1;
+        double x2  = fmax(0.0, x1 + h_stat - Hu);
+        double d1  = x1 - x2;
+        double Emax= fmin(0.1 * temperature, h_stat);
+        double s   = h_stat / Hu;
+        dydt[1]    = d1 - s * Emax;
 
         // 3) Surface
-        double x3     = fmin(x2, infil);
-        double d2     = x2 - x3;
-        double alfa2  = (1.0 / n_mann) * pow(h_surf, 2.0/3.0) * sqrt(slope);
-        double w      = fmin(1.0, alfa2 * L / A_h * 60.0);
-        double out2   = h_surf * w;
-        dydt[2]      = d2 - out2;
+        double x3    = fmin(x2, infil);
+        double d2    = x2 - x3;
+        double alfa2 = (1.0 / n_mann) * pow(h_surf, 2.0/3.0) * sqrt(slope);
+        double w     = fmin(1.0, alfa2 * L / A_h * 60.0);
+        dydt[2]      = d2 - h_surf * w;
 
         // 4) Gravitational (interflow)
-        double x4     = fmin(x3, perco);
-        double d3     = x3 - x4;
-        double out3   = (alpha3 >= 1.0 ? h_grav / alpha3 : 0.0);
-        dydt[3]      = d3 - out3;
+        double x4    = fmin(x3, perco);
+        double d3    = x3 - x4;
+        dydt[3]      = d3 - (alpha3 >= 1.0 ? h_grav / alpha3 : 0.0);
 
         // 5) Aquifer (baseflow)
-        double d4     = x4;
-        double out4   = (alpha4 >= 1.0 ? h_aq / alpha4 : 0.0);
-        dydt[4]      = d4 - out4;
+        dydt[4]      = x4 - (alpha4 >= 1.0 ? h_aq / alpha4 : 0.0);
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// These symbols are defined in models/model_204_global.cu
+// ─────────────────────────────────────────────────────────────────────────────
+extern __constant__ Model204::Parameters devParams;
+extern __constant__ SpatialParams*      devSpatialParamsPtr;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Optional kernel to inspect devParams on the device
+// ─────────────────────────────────────────────────────────────────────────────
+__global__ void checkDevParamsKernel204();

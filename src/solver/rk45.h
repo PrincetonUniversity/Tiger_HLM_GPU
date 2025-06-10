@@ -59,8 +59,10 @@ __global__ void rk45_then_radau_multi(
     int     num_queries,        // number of query times per system
     double  t0,                 // initial time of integration
     double  tf,                 // final time of integration
+    const typename Model::SP_TYPE* d_sp
     //const SpatialParams* d_sp   // pointer to device constant array of spatial parameters
-    const SpatialParams* __restrict__ sp_ptr 
+    //const SpatialParams* __restrict__ sp_ptr 
+    
 );
 
 #endif  // RK45_H

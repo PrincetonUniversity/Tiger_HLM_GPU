@@ -6,23 +6,25 @@
 #include "radau_kernel.cuh"     // declaration of radau_kernel_multi
 #include "radau_step_dense.cuh"       // radau_step() and radau_dense()
 #include "event_detector.cuh"   // reuse norm_inf, norm_inf_diff if needed
-#include "models/active_model.hpp"   // defines ActiveModel and extern __constant__ devParams
+//#include "models/active_model.hpp"   // defines Model204 and extern __constant__ devParams
+#include "models/model_204.hpp" // brings in Model204
 
 // -----------------------------------------------------------------------------
 // Implementation of radau_kernel_multi defined in radau_kernel.cuh
 // -----------------------------------------------------------------------------
-template <class ActiveModel>
+template <class Model204>
 __global__ void radau_kernel_multi(
-    double* y0_all,        // [num_systems × ActiveModel::N_EQ]: initial states
-    double* y_final_all,   // [num_systems × ActiveModel::N_EQ]: final states
+    double* y0_all,        // [num_systems × Model204::N_EQ]: initial states
+    double* y_final_all,   // [num_systems × Model204::N_EQ]: final states
     double* query_times,   // [num_queries]: sorted dense-output times
-    double* dense_all,     // [num_systems × ActiveModel::N_EQ × num_queries]: dense outputs
+    double* dense_all,     // [num_systems × Model204::N_EQ × num_queries]: dense outputs
     int     num_systems,   // total number of systems
     int     num_queries,   // total number of query times
     double  t0,            // start time
-    double  tf             // end time
+    double  tf,             // end time
+    const typename Model204::SP_TYPE* d_sp // Add this parameter
 ) {
-    constexpr int N_EQ = ActiveModel::N_EQ;
+    constexpr int N_EQ = Model204::N_EQ;
 
     // Identify which system this thread integrates
     int sys_id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -62,7 +64,7 @@ __global__ void radau_kernel_multi(
         if (t + h > tf) h = tf - t;
 
         // Take one Radau step (fills y_next and error_norm)
-        radau_step<ActiveModel>(t, y, y_next, N_EQ, h, my_rtol, my_atol, &error_norm, k_dummy, sys_id, d_sp);
+        radau_step<Model204>(t, y, y_next, N_EQ, h, my_rtol, my_atol, &error_norm, k_dummy, sys_id, d_sp);
 
         // Accept or reject based on embedded error
         if (error_norm <= 1.0) {
@@ -73,9 +75,9 @@ __global__ void radau_kernel_multi(
                 if (tq > t) {
                     double theta = (tq - t) / h;
                     double y_dense[N_EQ];
-                    //radau_dense<ActiveModel>(y, /*Z unused here*/ *(double(*)[N_EQ])k_dummy,
+                    //radau_dense<Model204>(y, /*Z unused here*/ *(double(*)[N_EQ])k_dummy,
                     //                         N_EQ, h, theta, y_dense);
-                    radau_dense<ActiveModel>(y,(double (*)[N_EQ]) k_dummy,N_EQ, h, theta, y_dense);
+                    radau_dense<Model204>(y,(double (*)[N_EQ]) k_dummy,N_EQ, h, theta, y_dense);
                     // store
                     for (int comp = 0; comp < N_EQ; ++comp) {
                         int idx = sys_id*(N_EQ*num_queries)
@@ -114,8 +116,11 @@ __global__ void radau_kernel_multi(
 }
 
 // ----------------------------------------------------------------------------
-// Explicit instantiation of radau_kernel_multi for ActiveModel
+// Explicit instantiation of radau_kernel_multi for Model204
 // ----------------------------------------------------------------------------
-template __global__ void radau_kernel_multi<ActiveModel>(
-    double*, double*, double*, double*, int, int, double, double
+// template __global__ void radau_kernel_multi<Model204>(
+//     double*, double*, double*, double*, int, int, double, double
+// );
+template __global__ void radau_kernel_multi<Model204>(
+    double*, double*, double*, double*, int, int, double, double, const typename Model204::SP_TYPE*
 );

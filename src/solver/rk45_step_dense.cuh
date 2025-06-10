@@ -41,7 +41,8 @@ __device__ void rk45_step(
     double atol,                         // absolute tolerance (scalar)
     double* error_norm,                  // ∞-norm error estimate
     double k[7][Model::N_EQ],             // stage slopes (output)
-    int sys_id                           // passing stream ID here
+    int sys_id,                           // passing stream ID here
+    const typename Model::SP_TYPE* d_sp  // spatial parameters (if needed by Model::rhs)
 ) {
     constexpr int N_EQ = Model::N_EQ;
 

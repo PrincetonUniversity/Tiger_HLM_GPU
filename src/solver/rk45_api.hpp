@@ -6,10 +6,10 @@
 #include <stdexcept>
 #include <tuple>                    // for std::make_tuple, std::tuple
 #include "rk45.h"                   // For template< class Model > rk45_kernel_multi<…>
-#include "models/model_dummy.hpp"   // For DummyModel::Parameters, etc.
-#include "models/active_model.hpp"  // Always brings in Model204 as ActiveModel
+//#include "models/model_dummy.hpp"   // For DummyModel::Parameters, etc.
+//#include "models/active_model.hpp"  // Always brings in Model204 as Model204
 #include "parameters_loader.hpp"    // for SpatialParams
-
+#include "models/model_204.hpp" // For Model204::Parameters, etc.
 // #if defined(USE_DUMMY_MODEL)
 // #  include "models/model_dummy.hpp"  // DummyModel::N_EQ and extern __constant__ DummyModel::Parameters devParams
 // #elif defined(USE_MODEL_204)
@@ -82,7 +82,7 @@ void launch_rk45_kernel(
     int num_queries,
     double t0,
     double tf,
-    const SpatialParams* d_sp   // pointer to device SpatialParams array
+    const typename Model::SP_TYPE* d_sp // ← pointer to spatial parameters
 ) {
     // constexpr int THREADS_X = 16;
     // constexpr int THREADS_Y = 16;
@@ -112,7 +112,7 @@ void launch_rk45_kernel(
            d_query_times, d_dense_all,
            num_systems, num_queries,
            t0, tf,
-           d_sp                // ← forwarded here
+           d_sp//const typename Model::SP_TYPE* d_sp //d_sp                // ← forwarded here
         );
 
     // Sync + check
@@ -186,7 +186,8 @@ run_rk45(
     double t0,
     double tf,
     const std::vector<double>& h_query_times,
-    const SpatialParams* d_sp   // pointer threaded through here too
+    //const SpatialParams* d_sp   // pointer threaded through here 
+    typename Model::SP_TYPE* d_sp  
 ) {
     // 1) alloc & copy
     auto [d_y0_all, d_y_final_all, d_query_times, d_dense_all, ns, nq]

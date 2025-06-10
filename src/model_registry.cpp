@@ -1,70 +1,62 @@
-// model_registry.cpp
-// This file provides the host-side hookup for copying model parameters into
-// the device-side symbol `devParams`.  In particular, it defines:
-//   1) A non-templated helper `setModelParameters(const ActiveModel::Parameters&)`
-//      that calls cudaMemcpyToSymbol to copy the host struct into the device symbol.
-//   2) A template specialization `rk45_api::setModelParameters<ActiveModel>`
-//      which forwards to the helper above.
-//   3) An explicit instantiation so the linker emits it.
-//
-// Because `devParams` resides in constant device memory (defined in the
-// corresponding model_global.cu), this mechanism ensures that the host can
-// update device parameters before launching any RK45 kernels.
+// This file provides the host‐side hookup for copying model parameters into
+// the device‐side symbol `devParams`.  It defines the non‐templated helper
+// and the explicit template specialization for Model204.
 
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <iostream>
-#include "model_registry.hpp"    // Declares helper + template prototype
-#include "models/active_model.hpp"// Brings in ActiveModel and extern __constant__ devParams
+#include "models/model_204.hpp"    // Model204 & extern __constant__ devParams
+#include "model_registry.hpp"
 
 using namespace rk45_api;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper that copies an ActiveModel::Parameters struct from host memory
-// into the device‐side constant symbol `devParams` (defined in model_global.cu).
+// Helper that copies a Model204::Parameters struct from host memory
+// into the device‐side constant symbol `devParams` (defined in model_204_global.cu).
 // Throws std::runtime_error if cudaMemcpyToSymbol fails.
 // ─────────────────────────────────────────────────────────────────────────────
-void setModelParameters(const ActiveModel::Parameters& p) {
-    std::cout << "Size of ActiveModel::Parameters: "
-              << sizeof(ActiveModel::Parameters) << " bytes" << std::endl;
+void setModelParameters(const Model204::Parameters& p) {
+    std::cout << "Size of Model204::Parameters: "
+              << sizeof(Model204::Parameters) << " bytes\n";
 
     // Ensure any previous CUDA calls have completed
     cudaDeviceSynchronize();
 
     // Copy host struct 'p' into device symbol 'devParams'
     cudaError_t err = cudaMemcpyToSymbol(
-        devParams,                                // device constant symbol
-        &p,                                       // address of host struct
-        sizeof(ActiveModel::Parameters),          // byte count
-        0,                                        // offset
-        cudaMemcpyHostToDevice                    // kind
+        &devParams,                              // device constant symbol
+        &p,                                     // address of host struct
+        sizeof(Model204::Parameters),           // byte count
+        0,                                      // offset
+        cudaMemcpyHostToDevice                  // kind
     );
     if (err != cudaSuccess) {
-        std::cerr << "cudaMemcpyToSymbol(ActiveModel) failed: "
-                  << cudaGetErrorString(err) << std::endl;
         throw std::runtime_error(
-            "cudaMemcpyToSymbol failed in setModelParameters(ActiveModel)"
+            std::string("cudaMemcpyToSymbol(devParams) failed: ")
+            + cudaGetErrorString(err)
         );
     }
-    std::cout << "cudaMemcpyToSymbol succeeded for ActiveModel devParams." << std::endl;
+    std::cout << "cudaMemcpyToSymbol succeeded for Model204 devParams.\n";
 
     // Wait for the copy to finish before returning
     cudaDeviceSynchronize();
 }
 
 namespace rk45_api {
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Template specialization forwarding to the above helper.
 // ─────────────────────────────────────────────────────────────────────────────
 template <>
-void setModelParameters<ActiveModel>(const ActiveModel::Parameters& p) {
+void setModelParameters<Model204>(const Model204::Parameters& p) {
     ::setModelParameters(p);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Explicit instantiation of the specialization.
+// Explicit instantiation so the specialization is emitted.
 // ─────────────────────────────────────────────────────────────────────────────
-template void setModelParameters<ActiveModel>(
-    const ActiveModel::Parameters& p
+template void setModelParameters<Model204>(
+    const Model204::Parameters& p
 );
+
 } // namespace rk45_api

@@ -11,7 +11,7 @@ static constexpr double SQRT6 = 2.449489742783178;
  * If Model::jacobian isn't available, approximate ∂f/∂y by finite differences.
  */
 template<class Model>
-__device__ void approx_jacobian(double t, const double* y, double J[Model::N_EQ][Model::N_EQ], int sys_id) {
+__device__ void approx_jacobian(double t, const double* y, double J[Model::N_EQ][Model::N_EQ], int sys_id, const typename Model::SP_TYPE* d_sp) {
     constexpr int N = Model::N_EQ;
     double f0[N], f1[N];
     Model::rhs(t, y, f0, N, sys_id, d_sp);
@@ -46,7 +46,8 @@ __device__ void radau_step(
     double        atol,
     double*       error_norm,
     double        /*k_unused*/[7][Model::N_EQ],  // dummy
-    int sys_id
+    int           sys_id,
+    const typename Model::SP_TYPE* d_sp
 ) {
     constexpr int N = Model::N_EQ;
 
@@ -97,7 +98,7 @@ __device__ void radau_step(
             #ifdef HAS_MODEL_JACOBIAN
                 Model::jacobian(t + c[s]*h, Yi, J);
             #else
-                approx_jacobian<Model>(t + c[s]*h, Yi, J, sys_id);
+                approx_jacobian<Model>(t + c[s]*h, Yi, J, sys_id, d_sp);
             #endif
 
             // Fill block row s of Mmat and rhs

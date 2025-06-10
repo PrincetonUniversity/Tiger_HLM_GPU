@@ -6,12 +6,11 @@
 #include "event_detector.cuh"    // norm_inf, norm_inf_diff, SLOPE_JUMP_THRESH, MIN_STEP_FRACTION
 #include "small_lu.cuh"          // small_matrix_LU_solve
 #include "radau_step_dense.cuh"  // radau_step, radau_dense
-#include "models/active_model.hpp"     // defines ActiveModel and extern __constant__ devParams
 #include "models/model_204.hpp"   // brings in Model204
 // -----------------------------------------------------------------------------
 // Single-kernel that does RK45, then (per-thread) falls back to Radau if needed.
 // -----------------------------------------------------------------------------
-template <class ActiveModel>
+template <class Model204>
 __global__ void rk45_then_radau_multi(
     double* y0_all,       // [num_systems × N_EQ]
     double* y_final_all,  // [num_systems × N_EQ]
@@ -21,11 +20,17 @@ __global__ void rk45_then_radau_multi(
     int     num_queries,
     double  t0,
     double  tf,
-    const SpatialParams* __restrict__ d_sp
-) {
-    constexpr int N_EQ = ActiveModel::N_EQ;
-
+    //const SpatialParams* __restrict__ d_sp
+    const typename Model204::SP_TYPE* __restrict__ d_sp
+) { 
+    // figure out which system this thread is working on
     int sys = blockIdx.x*blockDim.x + threadIdx.x;
+    if (blockIdx.x==0 && threadIdx.x==0) {
+        printf("[rk45_solver] entered rk45_then_radau_multi on sys %d\n", sys);
+    }
+    constexpr int N_EQ = Model204::N_EQ;
+
+    //int sys = blockIdx.x*blockDim.x + threadIdx.x;
     if (sys >= num_systems) return;
 
     // solver parameters
@@ -52,10 +57,10 @@ __global__ void rk45_then_radau_multi(
         if (t + h > tf) h = tf - t;
 
         // compute k45[0]
-        //ActiveModel::rhs(t, y, k45[0], N_EQ); //without sys
-        ActiveModel::rhs(t, y, k45[0], N_EQ, sys, d_sp);
+        //Model204::rhs(t, y, k45[0], N_EQ); //without sys
+        Model204::rhs(t, y, k45[0], N_EQ, sys, d_sp);
         // one RK45 step
-        rk45_step<ActiveModel>(t, y, y_next, N_EQ, h, rtol, atol, &err, k45, sys);
+        rk45_step<Model204>(t, y, y_next, N_EQ, h, rtol, atol, &err, k45, sys, d_sp);
 
         if (err <= 1.0) {
             // accepted
@@ -81,7 +86,7 @@ __global__ void rk45_then_radau_multi(
                 if (tq > t) {
                     double th = (tq - t)/h;
                     double yd[N_EQ];
-                    rk45_dense<ActiveModel>(y, k45, N_EQ, h, th, yd);
+                    rk45_dense<Model204>(y, k45, N_EQ, h, th, yd);
                     for(int c=0;c<N_EQ;++c){
                         int idx = sys*(N_EQ*num_queries) + c*num_queries + next_q;
                         dense_all[idx] = yd[c];
@@ -123,7 +128,7 @@ __global__ void rk45_then_radau_multi(
             if (t + h > tf) h = tf - t;
 
             // one Radau IIA step
-            radau_step<ActiveModel>(t, y_r, y_rnext, N_EQ, h, rtol, atol, &err, radau_k, sys);
+            radau_step<Model204>(t, y_r, y_rnext, N_EQ, h, rtol, atol, &err, radau_k, sys, d_sp);
 
             // ─── Dense‐output for leftover queries ───
             double t1 = t + h;
@@ -133,7 +138,7 @@ __global__ void rk45_then_radau_multi(
                     double th = (tq - t)/h;
                     double yd[N_EQ];
                     // <<< The only change: no cast, just pass radau_k directly >>>
-                    radau_dense<ActiveModel>(y_r, radau_k, N_EQ, h, th, yd);
+                    radau_dense<Model204>(y_r, radau_k, N_EQ, h, th, yd);
                     for(int c=0;c<N_EQ;++c) {
                         int idx = sys*(N_EQ*num_queries) + c*num_queries + next_q;
                         dense_all[idx] = yd[c];
@@ -165,25 +170,27 @@ __global__ void rk45_then_radau_multi(
 }
 
 // ----------------------------------------------------------------------------
-// Explicit instantiation for the chosen ActiveModel
+// Explicit instantiation for the chosen Model204
 // ----------------------------------------------------------------------------
- template __global__ void rk45_then_radau_multi<Model204>(
-     double* y0_all,
-     double* y_final_all,
-     double* query_times,
-     double* dense_all,
-     int     num_systems,
-     int     num_queries,
-     double  t0,
-     double  tf,
-     const SpatialParams* d_sp
- );
+//  template __global__ void rk45_then_radau_multi<Model204>(
+//      double* y0_all,
+//      double* y_final_all,
+//      double* query_times,
+//      double* dense_all,
+//      int     num_systems,
+//      int     num_queries,
+//      double  t0,
+//      double  tf,
+//      const Model204::SP_TYPE* __restrict__ d_sp
+//      //const SpatialParams* d_sp
+//  );
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EXPLICIT INSTANTIATION for Model204
-// ─────────────────────────────────────────────────────────────────────────────
-// template __global__ void rk45_kernel_multi<Model204>(
-//     double* y0, double* y, double* t, double* err,
-//     int system_size, int num_systems,
-//     double t0, double dt
-// );
+ template __global__ void rk45_then_radau_multi<Model204>(
+    double*,double*,double*,double*,
+    int,int,double,double,
+    const Model204::SP_TYPE* __restrict__ d_sp
+);
+
+
+
+
