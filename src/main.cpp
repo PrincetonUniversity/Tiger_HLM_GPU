@@ -17,7 +17,15 @@
 #include "radau_step_dense.cuh"      // device kernels for Radau‐IIA step + dense‐output
 //#include "models/active_model.hpp"   // defines Model204 alias & __constant__ devParams
 #include "parameters_loader.hpp"     // CSV loader for SpatialParams
-#include "output_netcdf.hpp"         //series output to netcdf 
+
+// PARALLEL INPUT OR NOT
+#ifdef ENABLE_PAR
+#include <mpi.h>
+#include "output_parallel.hpp"         // series output to netcdf (parallel version)
+#endif
+#include "output_series.hpp"          // series output to netcdf (serial version). ALWAYS INCLUDE
+//
+
 #include "models/model_204.hpp"      // brings in SpatialParams
 #include "stream.hpp"                // Stream<Model> wrapper (id, next_id, SpatialParams, y0)
 # include "radau_kernel.cuh"       // Radau‐only kernel for Model204
@@ -93,7 +101,8 @@ __global__ void debugRHS(const SpatialParams* sp, int sys_id) {
 
 // ----------------------------------------------------------------------------
 
-int main() {
+int main(int argc, char** argv) {
+
     // ───────── Print GPU properties ─────────
     int dev;
     cudaGetDevice(&dev);
@@ -114,7 +123,7 @@ int main() {
     }
     cudaDeviceSynchronize();
 
-   
+
 
     using namespace rk45_api;
 
@@ -195,7 +204,7 @@ int main() {
     err = cudaMemcpyToSymbol(devSpatialParamsPtr, &d_sp, sizeof(d_sp));
     if (err != cudaSuccess) {
         std::fprintf(stderr, "cudaMemcpyToSymbol(devSpatialParamsPtr) failed: %s\n",
-                     cudaGetErrorString(err));
+                    cudaGetErrorString(err));
         return 1;
     }
 
@@ -352,6 +361,8 @@ int main() {
     // ————————————————————————————————
 
     // ───────── Retrieve results & free buffers ─────────
+
+    // if(rank)
     auto [h_y_final, h_dense] = retrieve_and_free<Model204>(
         d_y0_all, d_y_final_all,
         d_query_times, d_dense_all, d_stiff,
@@ -388,12 +399,12 @@ int main() {
         dense_file << "\n";
         for (int q = 0; q < num_queries; ++q) {
             dense_file << std::fixed << std::setprecision(8)
-                       << h_query_times[q];
+                    << h_query_times[q];
             for (int s = 0; s < num_systems; ++s) {
                 for (int i = 0; i < Model204::N_EQ; ++i) {
                     int idx = (s * num_queries + q) * Model204::N_EQ + i;
                     dense_file << "," << std::setprecision(9)
-                               << h_dense[idx];
+                            << h_dense[idx];
                 }
             }
             dense_file << "\n";
@@ -410,41 +421,108 @@ int main() {
         std::printf("\n");
     }
 
-
     // ———————————————————————————————— 
     // ───────── Write to netcdf  ─────────
-    std::string dense_filename = "dense_example.nc";
-    std::string final_filename = "final_example.nc";
-    int compression_level = 4;
 
+    // !!!! NEED TO CHANGE TO ACCESS ACTUAL ID AND STATE INDEXES !!!.    
     int N_EQ = Model204::N_EQ;
-
-    // !!!! NEED TO CHANGE TO ACCESS ACTUAL ID AND STATE INDEXES !!!
     std::vector<int> linkid_vals(num_systems);
     std::vector<int> state_vals(N_EQ);
     for (int s = 0; s < num_systems; ++s) linkid_vals[s] = s;
     for (int v = 0; v < N_EQ; ++v) state_vals[v] = v;
 
-    // Write dense (3D)
-    write_dense_netcdf(dense_filename,
-                       h_dense.data(),
-                       h_query_times.data(),
-                       linkid_vals.data(),
-                       state_vals.data(),
-                       num_queries,
-                       num_systems,
-                       N_EQ,
-                       compression_level);
+    //Netcdf file attributes (will be defined in yaml)
+    std::string dense_filename = "dense_example.nc";
+    std::string final_filename = "final_example.nc";
+    int compression_level = 4;
 
     // Write only the final time step (2D output)
     write_final_netcdf(final_filename,
-                       h_y_final.data(),
-                       linkid_vals.data(),
-                       state_vals.data(),
-                       num_systems,
-                       N_EQ,
-                       compression_level);
+                    h_y_final.data(),
+                    linkid_vals.data(),
+                    state_vals.data(),
+                    num_systems,
+                    N_EQ,
+                    compression_level);
 
+    // !!! PARALLEL SWITCH FOR OUTPUT
+    #ifdef ENABLE_PAR
+
+        // // Broadcast query times to all ranks
+        // if (rank != 0) h_query_times.resize(num_queries);
+        // MPI_Bcast(h_query_times.data(), num_queries, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+        // // Determine chunk for each rank
+        // int queries_per_rank = num_queries / nprocs;
+        // int remainder = num_queries % nprocs;
+        // int q_start = rank * queries_per_rank + std::min(rank, remainder);
+        // int q_count = queries_per_rank + (rank < remainder ? 1 : 0);
+
+        // // Allocate local chunk
+        // std::vector<double> h_dense_chunk(num_systems * q_count * N_EQ);
+
+        // // Scatter the data by time chunk
+        // if (rank == 0) {
+        //     for (int r = 0; r < nprocs; ++r) {
+        //         int r_q_start = r * queries_per_rank + std::min(r, remainder);
+        //         int r_q_count = queries_per_rank + (r < remainder ? 1 : 0);
+        //         if (r == 0) {
+        //             // Copy to local chunk
+        //             for (int s = 0; s < num_systems; ++s) {
+        //                 for (int q = 0; q < r_q_count; ++q) {
+        //                     for (int i = 0; i < N_EQ; ++i) {
+        //                         int src_idx = (s * num_queries + (r_q_start + q)) * N_EQ + i;
+        //                         int dst_idx = (s * r_q_count + q) * N_EQ + i;
+        //                         h_dense_chunk[dst_idx] = h_dense[src_idx];
+        //                     }
+        //                 }
+        //             }
+        //         } else {
+        //             std::vector<double> temp(num_systems * r_q_count * N_EQ);
+        //             for (int s = 0; s < num_systems; ++s) {
+        //                 for (int q = 0; q < r_q_count; ++q) {
+        //                     for (int i = 0; i < N_EQ; ++i) {
+        //                         int src_idx = (s * num_queries + (r_q_start + q)) * N_EQ + i;
+        //                         int dst_idx = (s * r_q_count + q) * N_EQ + i;
+        //                         temp[dst_idx] = h_dense[src_idx];
+        //                     }
+        //                 }
+        //             }
+        //             MPI_Send(temp.data(), temp.size(), MPI_DOUBLE, r, 0, MPI_COMM_WORLD);
+        //         }
+        //     }
+        // } else {
+        //     MPI_Recv(h_dense_chunk.data(), h_dense_chunk.size(), MPI_DOUBLE, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        // }
+
+        // // Each rank also needs its local time chunk
+        // std::vector<double> h_query_times_chunk(q_count);
+        // for (int q = 0; q < q_count; ++q) {
+        //     h_query_times_chunk[q] = h_query_times[q_start + q];
+        // }
+
+        // write_dense_outputs_parallel(dense_filename, 
+        //     MPI_COMM_WORLD, rank,
+        //     num_systems, num_queries, N_EQ,
+        //     q_start, q_count,
+        //     h_query_times, h_dense_chunk,
+        //     compression_level
+        // );
+
+        // MPI_Finalize();
+
+    #else
+        // Write dense (3D)
+        write_dense_netcdf(dense_filename,
+                        h_dense.data(),
+                        h_query_times.data(),
+                        linkid_vals.data(),
+                        state_vals.data(),
+                        num_queries,
+                        num_systems,
+                        N_EQ,
+                        compression_level);
+    #endif
 
     return 0;
 }
