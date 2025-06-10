@@ -49,6 +49,19 @@ Load the required CUDA toolkit using the following command:
 
 ```
 module load cudatoolkit/12.9
+
+
+#for della-gpu 
+module load gcc-toolset/14
+module load aocc/5.0.0
+module load hdf5/aocc-5.0.0/1.14.4
+module load netcdf/aocc-5.0.0/hdf5-1.14.4/4.9.2
+
+#for gh
+module load gcc-toolset/14
+module load hdf5/gcc/1.14.4
+module load netcdf/gcc/hdf5-1.14.4/4.9.2
+
 ```
 
 ## Building & Running
