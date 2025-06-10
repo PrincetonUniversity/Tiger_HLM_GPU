@@ -28,13 +28,19 @@ NETCDF_PATH="${NETCDFDIR:-$NETCDF_ROOT}/include"
 HOST_INCLUDES   := -I. -I$(IO_DIR) -I$(SOLVER_DIR) -I$(MODELS_DIR) -I${NETCDF_PATH}
 DEVICE_INCLUDES := -I. -I$(SOLVER_DIR) -I$(MODELS_DIR) -I$(IO_DIR)
 
-# Compiler flags
-NVCCFLAGS := -std=c++17 -rdc=true \
-  -gencode arch=compute_80,code=compute_80 \
-  -gencode arch=compute_80,code=sm_80 \
-  $(DEVICE_INCLUDES) -DUSE_MODEL_204 -Wno-deprecated-gpu-targets \
-  -L${NETCDF_PATH}/lib64 -lnetcdf_c++4 -lnetcdf 
+# Compiler flags (della-gpu)
+# NVCCFLAGS := -std=c++17 -rdc=true \
+#   -gencode arch=compute_80,code=compute_80 \
+#   -gencode arch=compute_80,code=sm_80 \
+#   $(DEVICE_INCLUDES) -DUSE_MODEL_204 -Wno-deprecated-gpu-targets \
+#   -L${NETCDF_PATH}/lib64 -lnetcdf 
 
+# Compiler flags (della-gh)
+NVCCFLAGS := -std=c++17 -rdc=true \
+  -gencode arch=compute_90,code=compute_90 \
+  -gencode arch=compute_90,code=sm_90 \
+  $(DEVICE_INCLUDES) -DUSE_MODEL_204 -Wno-deprecated-gpu-targets \
+  -L${NETCDF_PATH}/lib64 -lnetcdf 
 
 HOSTFLAGS := -std=c++17 $(HOST_INCLUDES) -DUSE_MODEL_204 
 

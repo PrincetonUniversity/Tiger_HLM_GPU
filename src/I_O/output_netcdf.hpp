@@ -5,7 +5,7 @@
  * @brief Write a dense 3D array to a NetCDF file with optional compression.
  *
  * @param filename          Output NetCDF file name.
- * @param h_dense           Pointer to flattened 3D float array [system, time, variable].
+ * @param h_dense           Pointer to flattened 3D double array [system, time, variable].
  * @param time_vals         Pointer to array of time values (length: num_queries).
  * @param linkid_vals       Pointer to array of system/link IDs (length: num_systems).
  * @param state_vals        Pointer to array of state variable IDs (length: N_EQ).
@@ -28,7 +28,7 @@ void write_dense_netcdf(const std::string& filename,
  * @brief Write a 2D array [system, variable] to a NetCDF file (no time dimension).
  *
  * @param filename          Output NetCDF file name.
- * @param h_y_final         Pointer to flattened 2D float array [system, variable] (size: num_systems * N_EQ).
+ * @param h_y_final         Pointer to flattened 2D double array [system, variable] (size: num_systems * N_EQ).
  * @param linkid_vals       Pointer to array of system/link IDs (length: num_systems).
  * @param state_vals        Pointer to array of state variable IDs (length: N_EQ).
  * @param num_systems       Number of systems/links (size of linkid_vals).

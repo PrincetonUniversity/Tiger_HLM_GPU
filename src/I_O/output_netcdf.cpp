@@ -1,19 +1,19 @@
-#include <netcdf>
+#include <netcdf.h>
 #include <string>
 #include <iostream>
+#include <vector>
+
+#define NC_CHECK(call) \
+    do { \
+        int status = (call); \
+        if (status != NC_NOERR) { \
+            std::cerr << "NetCDF error: " << nc_strerror(status) << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+            return; \
+        } \
+    } while (0)
 
 /**
  * @brief Write a dense 3D array to a NetCDF file with optional compression.
- *
- * @param filename          Output NetCDF file name.
- * @param h_dense           Pointer to flattened 3D float array [system, time, variable].
- * @param time_vals         Pointer to array of time values (length: num_queries).
- * @param linkid_vals       Pointer to array of system/link IDs (length: num_systems).
- * @param state_vals        Pointer to array of state variable IDs (length: N_EQ).
- * @param num_queries       Number of time steps (size of time_vals).
- * @param num_systems       Number of systems/links (size of linkid_vals).
- * @param N_EQ              Number of state variables (size of state_vals).
- * @param compression_level Compression level (0 = no compression, 1-9 = increasing compression).
  */
 void write_dense_netcdf(const std::string& filename,
                         const double* h_dense,
@@ -24,60 +24,55 @@ void write_dense_netcdf(const std::string& filename,
                         int num_systems,
                         int N_EQ,
                         int compression_level = 4) {
-    try {
-        netCDF::NcFile dataFile(filename, netCDF::NcFile::replace);
+    int ncid, sys_dimid, time_dimid, var_dimid;
+    int sys_varid, time_varid, var_varid, dense_varid;
 
-        // Create dimensions
-        auto sysDim = dataFile.addDim("system", num_systems);
-        auto timeDim = dataFile.addDim("time", num_queries);
-        auto varDim = dataFile.addDim("variable", N_EQ);
+    // Create file
+    NC_CHECK(nc_create(filename.c_str(), NC_CLOBBER | NC_NETCDF4, &ncid));
 
-        // Add coordinate variables for each dimension
-        auto sysVar = dataFile.addVar("system", netCDF::ncInt, sysDim);
-        auto timeVar = dataFile.addVar("time", netCDF::ncFloat, timeDim);
-        auto varVar = dataFile.addVar("variable", netCDF::ncInt, varDim);
+    // Define dimensions
+    NC_CHECK(nc_def_dim(ncid, "system", num_systems, &sys_dimid));
+    NC_CHECK(nc_def_dim(ncid, "time", num_queries, &time_dimid));
+    NC_CHECK(nc_def_dim(ncid, "variable", N_EQ, &var_dimid));
 
-        // Fill coordinate variables with values
-        sysVar.putVar(linkid_vals);
-        timeVar.putVar(time_vals);
-        varVar.putVar(state_vals);
+    // Define coordinate variables
+    NC_CHECK(nc_def_var(ncid, "system", NC_INT, 1, &sys_dimid, &sys_varid));
+    NC_CHECK(nc_def_var(ncid, "time", NC_DOUBLE, 1, &time_dimid, &time_varid));
+    NC_CHECK(nc_def_var(ncid, "variable", NC_INT, 1, &var_dimid, &var_varid));
 
-        // Add attributes to coordinate variables
-        sysVar.putAtt("long_name", "LinkID");
-        timeVar.putAtt("long_name", "Time");
-        timeVar.putAtt("units", "minutes since start of simulation");
-        varVar.putAtt("long_name", "state variable");
-        varVar.putAtt("units", "various units");
+    // Add attributes
+    NC_CHECK(nc_put_att_text(ncid, sys_varid, "long_name", 6, "LinkID"));
+    NC_CHECK(nc_put_att_text(ncid, time_varid, "long_name", 4, "Time"));
+    NC_CHECK(nc_put_att_text(ncid, time_varid, "units", 37, "minutes since start of simulation"));
+    NC_CHECK(nc_put_att_text(ncid, var_varid, "long_name", 14, "state variable"));
+    NC_CHECK(nc_put_att_text(ncid, var_varid, "units", 13, "various units"));
 
-        // Create variable: 3D [system, time, variable]
-        auto denseVar = dataFile.addVar("outputs", netCDF::ncFloat, {sysDim, timeDim, varDim});
+    // Define main data variable
+    int dims[3] = {sys_dimid, time_dimid, var_dimid};
+    NC_CHECK(nc_def_var(ncid, "outputs", NC_DOUBLE, 3, dims, &dense_varid));
 
-        // Set compression if requested
-        if (compression_level > 0) {
-            denseVar.setCompression(true, true, compression_level);
-        }
-
-        // Write the flattened array
-        denseVar.putVar(h_dense);
-
-    } catch (netCDF::exceptions::NcException &e) {
-        std::cerr << "NetCDF error: " << e.what() << std::endl;
+    // Set compression if requested
+    if (compression_level > 0) {
+        NC_CHECK(nc_def_var_deflate(ncid, dense_varid, 1, 1, compression_level));
     }
+
+    // End define mode
+    NC_CHECK(nc_enddef(ncid));
+
+    // Write coordinate variables
+    NC_CHECK(nc_put_var_int(ncid, sys_varid, linkid_vals));
+    NC_CHECK(nc_put_var_double(ncid, time_varid, time_vals));
+    NC_CHECK(nc_put_var_int(ncid, var_varid, state_vals));
+
+    // Write main data
+    NC_CHECK(nc_put_var_double(ncid, dense_varid, h_dense));
+
+    // Close file
+    NC_CHECK(nc_close(ncid));
 }
-
-
 
 /**
  * @brief Write only the final time step of a dense 3D array to a NetCDF file (no time dimension).
- *
- * @param filename          Output NetCDF file name.
- * @param h_dense           Pointer to flattened 3D float array [system, time, variable].
- * @param linkid_vals       Pointer to array of system/link IDs (length: num_systems).
- * @param state_vals        Pointer to array of state variable IDs (length: N_EQ).
- * @param num_queries       Number of time steps (size of time dimension in h_dense).
- * @param num_systems       Number of systems/links (size of linkid_vals).
- * @param N_EQ              Number of state variables (size of state_vals).
- * @param compression_level Compression level (0 = no compression, 1-9 = increasing compression).
  */
 void write_final_netcdf(const std::string& filename,
                         const double* h_y_final,
@@ -86,38 +81,44 @@ void write_final_netcdf(const std::string& filename,
                         int num_systems,
                         int N_EQ,
                         int compression_level) {
-    try {
-        netCDF::NcFile dataFile(filename, netCDF::NcFile::replace);
+    int ncid, sys_dimid, var_dimid;
+    int sys_varid, var_varid, final_varid;
 
-        // Create dimensions (no time)
-        auto sysDim = dataFile.addDim("system", num_systems);
-        auto varDim = dataFile.addDim("variable", N_EQ);
+    // Create file
+    NC_CHECK(nc_create(filename.c_str(), NC_CLOBBER | NC_NETCDF4, &ncid));
 
-        // Add coordinate variables for each dimension
-        auto sysVar = dataFile.addVar("system", netCDF::ncInt, sysDim);
-        auto varVar = dataFile.addVar("variable", netCDF::ncInt, varDim);
+    // Define dimensions
+    NC_CHECK(nc_def_dim(ncid, "system", num_systems, &sys_dimid));
+    NC_CHECK(nc_def_dim(ncid, "variable", N_EQ, &var_dimid));
 
-        // Fill coordinate variables with values
-        sysVar.putVar(linkid_vals);
-        varVar.putVar(state_vals);
+    // Define coordinate variables
+    NC_CHECK(nc_def_var(ncid, "system", NC_INT, 1, &sys_dimid, &sys_varid));
+    NC_CHECK(nc_def_var(ncid, "variable", NC_INT, 1, &var_dimid, &var_varid));
 
-        // Add attributes to coordinate variables
-        sysVar.putAtt("long_name", "LinkID");
-        varVar.putAtt("long_name", "state variable");
-        varVar.putAtt("units", "various units");
+    // Add attributes
+    NC_CHECK(nc_put_att_text(ncid, sys_varid, "long_name", 6, "LinkID"));
+    NC_CHECK(nc_put_att_text(ncid, var_varid, "long_name", 14, "state variable"));
+    NC_CHECK(nc_put_att_text(ncid, var_varid, "units", 13, "various units"));
 
-        // Create variable: 2D [system, variable]
-        auto finalVar = dataFile.addVar("outputs", netCDF::ncFloat, {sysDim, varDim});
+    // Define main data variable
+    int dims[2] = {sys_dimid, var_dimid};
+    NC_CHECK(nc_def_var(ncid, "outputs", NC_DOUBLE, 2, dims, &final_varid));
 
-        // Set compression if requested
-        if (compression_level > 0) {
-            finalVar.setCompression(true, true, compression_level);
-        }
-
-        // Write the provided 2D array directly
-        finalVar.putVar(h_y_final);
-
-    } catch (netCDF::exceptions::NcException &e) {
-        std::cerr << "NetCDF error: " << e.what() << std::endl;
+    // Set compression if requested
+    if (compression_level > 0) {
+        NC_CHECK(nc_def_var_deflate(ncid, final_varid, 1, 1, compression_level));
     }
+
+    // End define mode
+    NC_CHECK(nc_enddef(ncid));
+
+    // Write coordinate variables
+    NC_CHECK(nc_put_var_int(ncid, sys_varid, linkid_vals));
+    NC_CHECK(nc_put_var_int(ncid, var_varid, state_vals));
+
+    // Write main data
+    NC_CHECK(nc_put_var_double(ncid, final_varid, h_y_final));
+
+    // Close file
+    NC_CHECK(nc_close(ncid));
 }
