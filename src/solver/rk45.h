@@ -1,4 +1,3 @@
-//solver/rk45.h
 #ifndef RK45_H
 #define RK45_H
 
@@ -59,9 +58,10 @@ __global__ void rk45_then_radau_multi(
     int     num_queries,        // number of query times per system
     double  t0,                 // initial time of integration
     double  tf,                 // final time of integration
-    const typename Model::SP_TYPE* d_sp
+    const typename Model::SP_TYPE* d_sp,
+    int*    d_stiff             // NEW: flags for stiffness detection
     //const SpatialParams* d_sp   // pointer to device constant array of spatial parameters
-    //const SpatialParams* __restrict__ sp_ptr 
+    //const SpatialParams* sp_ptr 
     
 );
 

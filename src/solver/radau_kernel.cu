@@ -12,29 +12,54 @@
 // -----------------------------------------------------------------------------
 // Implementation of radau_kernel_multi defined in radau_kernel.cuh
 // -----------------------------------------------------------------------------
+// This kernel integrates multiple systems in parallel using the Radau IIA method.
+
 template <class Model204>
 __global__ void radau_kernel_multi(
-    double* y0_all,        // [num_systems × Model204::N_EQ]: initial states
-    double* y_final_all,   // [num_systems × Model204::N_EQ]: final states
-    double* query_times,   // [num_queries]: sorted dense-output times
-    double* dense_all,     // [num_systems × Model204::N_EQ × num_queries]: dense outputs
-    int     num_systems,   // total number of systems
-    int     num_queries,   // total number of query times
-    double  t0,            // start time
-    double  tf,             // end time
-    const typename Model204::SP_TYPE* d_sp // Add this parameter
-) {
+    double* y0_all,
+    double* y_final_all,
+    double* query_times,
+    double* dense_all,
+    int     num_systems,
+    int     num_queries,
+    double  t0,
+    double  tf,
+    const typename Model204::SP_TYPE* d_sp,
+    int*    stiff_system_indices,
+    int     n_stiff
+)
+    
+  {
     constexpr int N_EQ = Model204::N_EQ;
 
-    // Identify which system this thread integrates
-    int sys_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (sys_id >= num_systems) return;
+    // // Identify which system this thread integrates
+    // int sys_id = blockIdx.x * blockDim.x + threadIdx.x;
+    // if (sys_id >= num_systems) return;
+
+    // if (idx == 0) {
+    // printf("Radau kernel running on systems: ");
+    // for (int i = 0; i < n_stiff; ++i) printf("%d ", stiff_system_indices[i]);
+    // printf("\n");
+    // }
+
 
     // ─── DEBUG CHECK: only print once from sys_id == 0 ───
     // if (sys_id == 0) {
     //     printf("RADAU KERNEL: num_systems = %d, num_queries = %d\n", num_systems, num_queries);
     // }
     // ─────────────────────────────────────────────────────────
+
+    // 1) Map thread → index in the stiff list
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n_stiff) return;
+    int sys_id = stiff_system_indices[idx];
+
+    // 2) One‐time debug print
+    if (idx == 0) {
+        printf("Radau on systems:");
+        for (int i = 0; i < n_stiff; ++i) printf(" %d", stiff_system_indices[i]);
+        printf("\n");
+    }
 
     // Load tolerances and initial step from constant memory
     double my_rtol = devParams.rtol;
@@ -118,9 +143,11 @@ __global__ void radau_kernel_multi(
 // ----------------------------------------------------------------------------
 // Explicit instantiation of radau_kernel_multi for Model204
 // ----------------------------------------------------------------------------
-// template __global__ void radau_kernel_multi<Model204>(
-//     double*, double*, double*, double*, int, int, double, double
-// );
 template __global__ void radau_kernel_multi<Model204>(
-    double*, double*, double*, double*, int, int, double, double, const typename Model204::SP_TYPE*
+    double*, double*, double*, double*,
+    int, int, double, double,
+    const typename Model204::SP_TYPE*, 
+    int*,     // stiff_system_indices
+    int       // n_stiff
 );
+
