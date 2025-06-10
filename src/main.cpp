@@ -19,7 +19,8 @@
 #include "parameters_loader.hpp"     // CSV loader for SpatialParams
 #include "models/model_204.hpp"      // brings in SpatialParams
 #include "stream.hpp"                // Stream<Model> wrapper (id, next_id, SpatialParams, y0)
-
+# include "radau_kernel.cuh"       // Radau‐only kernel for Model204
+//# include "rk45_kernel.cuh"
 //#include "solver/rk45_kernel.cu" // RK45+Radau kernel for Model204
 // ───────── Minimal test kernel ─────────
 __global__ void testKernel() { /* nothing */ }
@@ -88,18 +89,6 @@ __global__ void debugRHS(const SpatialParams* sp, int sys_id) {
 
 // ----- ended debugging -----
 
-// // ── Force the RK45+Radau kernel into the primary cubin ──
-// template __global__ void rk45_then_radau_multi<Model204>(
-//     double* y0_all,
-//     double* y_final_all,
-//     double* query_times,
-//     double* dense_all,
-//     int     num_systems,
-//     int     num_queries,
-//     double  t0,
-//     double  tf,
-//     const Model204::SP_TYPE* __restrict__ d_sp
-// );
 
 // ----------------------------------------------------------------------------
 
@@ -219,18 +208,18 @@ int main() {
 
     
 
-    // ------ Debugging: launch debugAllParams to print every stream ------
-    {
-        int dbgThreads = 32;
-        int dbgBlocks  = (num_systems + dbgThreads - 1) / dbgThreads;
-        debugAllParams<<<dbgBlocks, dbgThreads>>>(d_sp, num_systems);
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            std::fprintf(stderr, "debugAllParams kernel failed: %s\n", cudaGetErrorString(err));
-        } else {
-            std::puts("debugAllParams kernel ran successfully");
-        }
-    }
+    // // ------ Debugging: launch debugAllParams to print every stream ------
+    // {
+    //     int dbgThreads = 32;
+    //     int dbgBlocks  = (num_systems + dbgThreads - 1) / dbgThreads;
+    //     debugAllParams<<<dbgBlocks, dbgThreads>>>(d_sp, num_systems);
+    //     err = cudaDeviceSynchronize();
+    //     if (err != cudaSuccess) {
+    //         std::fprintf(stderr, "debugAllParams kernel failed: %s\n", cudaGetErrorString(err));
+    //     } else {
+    //         std::puts("debugAllParams kernel ran successfully");
+    //     }
+    // }
     // ----- ended debugging -----
 
     // Verify via checkDevParamsKernel204
@@ -248,7 +237,7 @@ int main() {
     if (err != cudaSuccess) {
         std::fprintf(stderr, "debugParams kernel failed: %s\n", cudaGetErrorString(err));
     } else {
-        std::puts("debugParams kernel ran successfully");
+        std::puts("debugParams kernel ran successfully!!!");
     }
     // __________ end debugging spatial params __________
 
@@ -301,10 +290,24 @@ int main() {
     }
 
     // ───────── Allocate GPU buffers & launch solver ─────────
+    // double *d_y0_all, *d_y_final_all, *d_query_times, *d_dense_all;
+    // int ns, nq;
+    // std::tie(d_y0_all, d_y_final_all, d_query_times, d_dense_all, ns, nq) =
+    //     setup_gpu_buffers<Model204>(h_y0, h_query_times);
+
     double *d_y0_all, *d_y_final_all, *d_query_times, *d_dense_all;
-    int ns, nq;
-    std::tie(d_y0_all, d_y_final_all, d_query_times, d_dense_all, ns, nq) =
-        setup_gpu_buffers<Model204>(h_y0, h_query_times);
+    int    *d_stiff;                // NEW: flags buffer
+    int     ns, nq;
+
+    std::tie(d_y0_all,
+            d_y_final_all,
+            d_query_times,
+            d_dense_all,
+            d_stiff,          // ← now unpack 7 items
+            ns,
+            nq)
+        = setup_gpu_buffers<Model204>(h_y0, h_query_times);
+
 
     // ───────── Diagnostic launch + checks ─────────
     const int THREADS_PER_BLOCK = 128;
@@ -325,7 +328,7 @@ int main() {
         d_query_times, d_dense_all,
         ns, nq,
         t0, tf,
-        d_sp
+        d_sp, d_stiff
     );
 
     err = cudaGetLastError();
@@ -350,8 +353,9 @@ int main() {
     // ───────── Retrieve results & free buffers ─────────
     auto [h_y_final, h_dense] = retrieve_and_free<Model204>(
         d_y0_all, d_y_final_all,
-        d_query_times, d_dense_all,
-        ns, nq
+        d_query_times, d_dense_all, d_stiff,
+        ns, nq,
+        t0, tf, d_sp
     );
 
     // ───────── Write final.csv ─────────
