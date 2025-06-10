@@ -19,10 +19,7 @@ BIN         := rk45_solver
 # Build modes
 DEBUG   ?= 0
 VERBOSE ?= 0
-
-
-# Try NETCDFDIR first, fallback to NETCDF_ROOT
-NETCDF_PATH="${NETCDFDIR:-$NETCDF_ROOT}/include"
+PARALLEL ?= 0
 
 # Include paths
 HOST_INCLUDES   := -I. -I$(IO_DIR) -I$(SOLVER_DIR) -I$(MODELS_DIR) -I${NETCDF_PATH}
@@ -39,8 +36,7 @@ DEVICE_INCLUDES := -I. -I$(SOLVER_DIR) -I$(MODELS_DIR) -I$(IO_DIR)
 NVCCFLAGS := -std=c++17 -rdc=true \
   -gencode arch=compute_90,code=compute_90 \
   -gencode arch=compute_90,code=sm_90 \
-  $(DEVICE_INCLUDES) -DUSE_MODEL_204 -Wno-deprecated-gpu-targets \
-  -L${NETCDF_PATH}/lib64 -lnetcdf 
+  $(DEVICE_INCLUDES) -DUSE_MODEL_204 -Wno-deprecated-gpu-targets
 
 HOSTFLAGS := -std=c++17 $(HOST_INCLUDES) -DUSE_MODEL_204 
 
@@ -56,13 +52,38 @@ else
   Q := @
 endif
 
+
+# Parallel nc out options
+
+# Try NETCDFDIR first, fallback to NETCDF_ROOT
+NETCDF_PATH="${NETCDFDIR:-$NETCDF_ROOT}/include"
+
+OUT_CPP = $(IO_DIR)/output_series.cpp # Always include output_series.cpp for snapshot out
+ifeq ($(PARALLEL),1)
+  #mpicc
+  MPI_INC := $(shell mpicxx --showme:compile)
+  RAW_MPI_LIB := $(shell mpicxx --showme:link)
+
+  # Convert -Wl,-rpath,... into nvcc-friendly format
+  MPI_LIB := $(shell echo $(RAW_MPI_LIB) | sed 's/-Wl,/ -Xlinker /g' | sed 's/,/ -Xlinker /g')
+
+  HOSTFLAGS += $(MPI_INC)
+  NVCCFLAGS += -DENABLE_PAR \
+                      $(MPI_INC) \
+                      -L${NETCDF_PATH}/lib64 -lnetcdf $(MPI_LIB)
+  # Append output_parallel.cpp when PARALLEL=1
+  OUT_CPP += $(IO_DIR)/output_parallel.cpp
+else
+  NVCCFLAGS += -L${NETCDF_PATH}/lib64 -lnetcdf 
+endif
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Source lists
 # ─────────────────────────────────────────────────────────────────────────────
 SRC_MAIN_CU  := main.cpp
 SRC_HOST_CPP := model_registry.cpp
 SRC_IO_CPP   := $(IO_DIR)/parameters_loader.cpp \
-                $(IO_DIR)/output_netcdf.cpp
+                $(OUT_CPP)
 
 # Temporarily disable ETmethods.cpp and soiltemp.cpp until host-device attributes are fixed
 # SRC_UTIL_CPP := $(MODELS_DIR)/ETmethods.cpp $(MODELS_DIR)/soiltemp.cpp
@@ -85,7 +106,7 @@ DEVICE_LINK  := $(OBJ_DIR)/device_link.o
 .PHONY: all clean
 
 all: $(BIN)
-	@echo "Built $(BIN) [DEBUG=$(DEBUG) VERBOSE=$(VERBOSE)]"
+	@echo "Built $(BIN) [DEBUG=$(DEBUG) VERBOSE=$(VERBOSE) PARALLEL=$(PARALLEL)]"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Create object directories
