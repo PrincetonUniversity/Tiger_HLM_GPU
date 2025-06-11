@@ -535,13 +535,7 @@ int main(int argc, char** argv) {
                         compression_level);
         // #endif
     } else {
-        // Other ranks wait for data
-        std::vector<double> recv_data(4);
-        MPI_Recv(recv_data.data(), 4, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-        std::cout << "Rank " << rank << ": Received data = ";
-        for (double d : recv_data) std::cout << d << " ";
-        std::cout << std::endl;
+        std::cout << "Rank " << std::endl;
     }
 
     // Finalize MPI
