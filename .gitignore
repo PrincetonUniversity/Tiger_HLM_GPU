@@ -33,3 +33,22 @@ rk45_kernel
 # --- Profiling / binary output ----------------------------------------------
 *.nsys-rep
 *.sqlite
+src/final_204_a.csv
+src/dense.csv
+src/final_204_a.csv
+src/dense.csv
+src/final_204_a.csv
+src/dense.csv
+src/final_example.nc
+src/dense_204_a.csv
+src/final_204_a.csv
+src/dense_example.nc
+src/vgcore.454475
+src/valgrind.txt
+src/dense_204_a.csv
+src/dense_example.nc
+src/dense.csv
+src/final_204_a.csv
+src/final_example.nc
+src/dense_204_a.csv
+src/dense_example.nc
