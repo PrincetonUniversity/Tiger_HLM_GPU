@@ -139,7 +139,7 @@ int main(int argc, char** argv) {
         using namespace rk45_api;
 
         // ───────── 0) load per‐stream spatial parameters ─────────
-        auto spatialParams = loadSpatialParams("../data/small_example_params.csv");
+        auto spatialParams = loadSpatialParams("../data/small_test.csv");
 
         // build a vector of Stream<Model204>, using a common y0
         std::array<double, Model204::N_EQ> y0_common = {0.01, 3.0, 0.0, 5.0, 0.2};
@@ -535,7 +535,7 @@ int main(int argc, char** argv) {
                         compression_level);
         // #endif
     } else {
-        std::cout << "Rank " << std::endl;
+        std::cout << "I am a non-zero rank: " << rank << std::endl;
     }
 
     // Finalize MPI
