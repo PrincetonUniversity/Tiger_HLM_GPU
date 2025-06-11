@@ -63,6 +63,7 @@ SRC_MAIN_CU  := main.cpp
 SRC_HOST_CPP := model_registry.cpp
 SRC_IO_CPP   := $(IO_DIR)/parameters_loader.cpp \
                 $(IO_DIR)/config_loader.cpp \
+                $(IO_DIR)/forcing_loader.cpp \
                 $(IO_DIR)/output_netcdf.cpp
 
 # Temporarily disable ETmethods.cpp and soiltemp.cpp until host-device attributes are fixed

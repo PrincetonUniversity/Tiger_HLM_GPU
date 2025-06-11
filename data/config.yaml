@@ -18,20 +18,20 @@ parameters:    # spatially varied parameters
 
 forcings:    
   type: "folder_nc"    # P.S., not sure what this means, will clarify with Manjaree
-  path: "data/forcing/"
+  path: "../data/forcing/"
   time_chunking: true    # whether to chunk the time dimension
   variables:
     - name: "precipitation"
       file: "pr_hourly_era5land_2019.nc"
       var_name: "pr"    # var name in the NetCDF file
       time_resolution: "hourly"    # four options: "minute", "hourly", "daily", "monthly"
-      time_chunk_size: 24
+      time_chunk_size: 72
       required: true
     - name: "temperature"
       file: "t2m_daily_avg_era5land_2019.nc"
       var_name: "t2m"
       time_resolution: "daily"
-      time_chunk_size: 1
+      time_chunk_size: 3
       required: true
     # leaving space for other variables in the future
 

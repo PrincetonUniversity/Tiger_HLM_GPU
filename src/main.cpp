@@ -10,6 +10,7 @@
 #include <algorithm>  // for std::max, std::fmin, std::fmax
 
 #include "I_O/config_loader.hpp"         // loadConfig
+#include "I_O/forcing_loader.hpp"       // netcdf loader & mapper
 
 #include "rk45.h"                    // core RK45 solver interface (host‐side API)
 #include "model_registry.hpp"        // setModelParameters<Model204>()
@@ -141,6 +142,63 @@ int main() {
     for (const auto& value : config.constant_parameters_values) {
         std::cout << "  - Value: " << value << std::endl;
     }
+
+    // ───────── load forcing data ─────────
+    // first, define a struct to hold the information about loaded data
+    struct LoadedVariable {
+        std::unique_ptr<NetCDFLoader> loader;    // unique pointer to the NetCDFLoader defined by the forcing loader
+        std::unique_ptr<float[]> data_chunk;    // pointer to the loaded data chunk
+        std::string name;    // name of the variable, e.g. "precipitation" or "temperature"
+    };
+
+    std::vector<LoadedVariable> loaded_variables;    // vector to hold all loaded variables structs
+    std::vector<std::string> var_names = {"precipitation", "temperature"};
+
+    // first assume load the chunk from the beginning of the time series
+    size_t startTime = 0;    
+
+    for (size_t i = 0; i < config.forcing_variables.size(); ++i) {
+        const auto& var_config = config.forcing_variables[i];
+        
+        LoadedVariable var;    // bad naming: var is a struct holding the loaded variable data
+        var.name = var_names[i];
+        
+        // create file path and loader
+        const std::string file_path = config.forcings_path + var_config.file;
+        var.loader = std::make_unique<NetCDFLoader>(file_path, var_config.var_name);
+        
+        // load the first time chunk
+        size_t numTimeSteps = var_config.time_chunk_size;
+        var.data_chunk = var.loader->loadTimeChunk(startTime, numTimeSteps);
+        
+        // check if data loaded correctly
+        if (var.loader->isDataLoaded()) {
+            std::cout << var.name << " data loaded successfully from " 
+                    << var.loader->getFileName() << " for variable " 
+                    << var.loader->getVariableName() << std::endl;
+        } else {
+            std::cerr << var.name << " data loading failed." << std::endl;
+            return 1;
+        }
+        
+        loaded_variables.push_back(std::move(var));
+    }
+
+    // print loaded data value at given index to demonstrate access
+    const size_t time_index = 0;
+    const size_t lat_index = 0;    
+    const size_t lon_index = 300;    
+    const auto& pr_loaded = loaded_variables[0];    // precipitation
+
+    const float pr_value = pr_loaded.loader->getValueFromChunk(
+        pr_loaded.data_chunk, time_index, lat_index, lon_index, pr_loaded.loader->getTimeSize(), pr_loaded.loader->getLatSize(), pr_loaded.loader->getLonSize()
+    );
+
+    std::cout << "Loaded " << pr_loaded.name << " value at (time=" 
+              << time_index << ", lat=" << lat_index 
+              << ", lon=" << lon_index << "): "
+              << pr_value << std::endl;
+    // ───────── end loading forcing data ─────────
 
     // ───────── 0) load per‐stream spatial parameters ─────────
     auto spatialParams = loadSpatialParams("../data/small_test.csv");
