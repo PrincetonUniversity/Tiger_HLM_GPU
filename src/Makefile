@@ -19,10 +19,9 @@ BIN         := rk45_solver
 # Build modes
 DEBUG   ?= 0
 VERBOSE ?= 0
-PARALLEL ?= 0
 
 # Include paths
-HOST_INCLUDES   := -I. -I$(IO_DIR) -I$(SOLVER_DIR) -I$(MODELS_DIR) -I${NETCDF_PATH}
+HOST_INCLUDES   := -I. -I$(IO_DIR) -I$(SOLVER_DIR) -I$(MODELS_DIR)
 DEVICE_INCLUDES := -I. -I$(SOLVER_DIR) -I$(MODELS_DIR) -I$(IO_DIR)
 
 # Compiler flags (della-gpu)
@@ -55,30 +54,18 @@ else
 endif
 
 
-# Parallel nc out options
-
-# Try NETCDFDIR first, fallback to NETCDF_ROOT
+# Netcdf writing output (MOVE TO OTHER SECTION)
 NETCDF_PATH="${NETCDFDIR:-$NETCDF_ROOT}/include"
-
 OUT_CPP = $(IO_DIR)/output_series.cpp # Always include output_series.cpp for snapshot out
-ifeq ($(PARALLEL),1)
-	#mpicc
-	MPI_INC := $(shell mpicxx --showme:compile)
-	RAW_MPI_LIB := $(shell mpicxx --showme:link)
+NVCCFLAGS += -L${NETCDF_PATH}/lib64 -lnetcdf $(MPI_LIB)
 
-	# Convert -Wl,-rpath,... into nvcc-friendly format
-	MPI_LIB := $(shell echo $(RAW_MPI_LIB) | sed 's/-Wl,/ -Xlinker /g' | sed 's/,/ -Xlinker /g')
-
-	HOSTFLAGS += $(MPI_INC)
-	NVCCFLAGS += -DENABLE_PAR \
-	                    $(MPI_INC) \
-	                    -L${NETCDF_PATH}/lib64 -lnetcdf $(MPI_LIB)
-	# Append output_parallel.cpp when PARALLEL=1
-	OUT_CPP += $(IO_DIR)/output_parallel.cpp
-else
-	NVCCFLAGS += -L${NETCDF_PATH}/lib64 -lnetcdf 
-endif
-
+# mpicc
+MPI_INC := $(shell mpicxx --showme:compile)
+RAW_MPI_LIB := $(shell mpicxx --showme:link)
+MPI_LIB := $(shell echo $(RAW_MPI_LIB) | sed 's/-Wl,/ -Xlinker /g' | sed 's/,/ -Xlinker /g')
+HOSTFLAGS += $(MPI_INC)
+NVCCFLAGS += $(MPI_INC)
+					
 # ─────────────────────────────────────────────────────────────────────────────
 # Source lists
 # ─────────────────────────────────────────────────────────────────────────────
@@ -110,7 +97,7 @@ DEVICE_LINK  := $(OBJ_DIR)/device_link.o
 .PHONY: all clean
 
 all: $(BIN)
-	@echo "Built $(BIN) [DEBUG=$(DEBUG) VERBOSE=$(VERBOSE) PARALLEL=$(PARALLEL)]"
+	@echo "Built $(BIN) [DEBUG=$(DEBUG) VERBOSE=$(VERBOSE)]"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Create object directories

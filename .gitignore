@@ -33,3 +33,7 @@ rk45_kernel
 # --- Profiling / binary output ----------------------------------------------
 *.nsys-rep
 *.sqlite
+data/pr_hourly_era5land_2019.nc
+data/t2m_daily_avg_era5land_2019.nc
+src/dense_204_a.csv
+src/final_204_a.csv
