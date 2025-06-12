@@ -46,7 +46,10 @@ struct Model204
                     double *dydt,
                     int /*n*/,
                     int sys,   // which stream index we’re on
-                    const SpatialParams* sp_ptr)
+                    const SpatialParams* sp_ptr,
+                    const float*  F,     // pointer to forcing values
+                    int nForc // how many forcings
+                    )
     {
         const SpatialParams &P = sp_ptr[sys];
 
@@ -70,9 +73,15 @@ struct Model204
         double melt_f = P.melt_f,  temp_thr = P.temp_thr;
 
         // — stub forcings (for now) —
-        double rainfall    = 0.001;        // [m/min]
-        double temperature = 1.0;          // [°C]
+        // double rainfall    = 0.001;        // [m/min]
+        // double temperature = 1.0;          // [°C]
         double doy         = 1.0 + t/1440; // day‐of‐year 
+
+        // - forcings -
+        // use F[0] as rainfall, F[1] as temperature
+        double rainfall    = (nForc>0 ? F[0] : 0.0);
+        double temperature = (nForc>1 ? F[1] : 0.0);
+
 
         // 1) Snow
         double snowmelt = (temperature >= temp_thr)
