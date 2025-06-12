@@ -6,7 +6,7 @@
 # Locate nvcc (allow override via environment)
 NVCC ?= $(shell which nvcc 2>/dev/null)
 ifeq ($(NVCC),)
-  NVCC := /usr/local/cuda/bin/nvcc
+	NVCC := /usr/local/cuda/bin/nvcc
 endif
 
 # Directories
@@ -34,22 +34,24 @@ DEVICE_INCLUDES := -I. -I$(SOLVER_DIR) -I$(MODELS_DIR) -I$(IO_DIR)
 
 # Compiler flags (della-gh)
 NVCCFLAGS := -std=c++17 -rdc=true \
-  -gencode arch=compute_90,code=compute_90 \
-  -gencode arch=compute_90,code=sm_90 \
-  $(DEVICE_INCLUDES) -DUSE_MODEL_204 -Wno-deprecated-gpu-targets
+	-gencode arch=compute_90,code=compute_90 \
+	-gencode arch=compute_90,code=sm_90 \
+	$(DEVICE_INCLUDES) -DUSE_MODEL_204 -Wno-deprecated-gpu-targets
 
-HOSTFLAGS := -std=c++17 $(HOST_INCLUDES) -DUSE_MODEL_204 
+# HOSTFLAGS := -std=c++17 $(HOST_INCLUDES) -DUSE_MODEL_204 
+HOSTFLAGS := -std=c++17 $(HOST_INCLUDES) -DUSE_MODEL_204 \
+             -L${NETCDF_PATH}/lib64 -lnetcdf
 
 ifeq ($(DEBUG),1)
-  NVCCFLAGS += -g -G -O0
+	NVCCFLAGS += -g -G -O0
 else
-  NVCCFLAGS += -O2
+	NVCCFLAGS += -O2
 endif
 
 ifeq ($(VERBOSE),1)
-  Q :=
+	Q :=
 else
-  Q := @
+	Q := @
 endif
 
 
@@ -60,21 +62,21 @@ NETCDF_PATH="${NETCDFDIR:-$NETCDF_ROOT}/include"
 
 OUT_CPP = $(IO_DIR)/output_series.cpp # Always include output_series.cpp for snapshot out
 ifeq ($(PARALLEL),1)
-  #mpicc
-  MPI_INC := $(shell mpicxx --showme:compile)
-  RAW_MPI_LIB := $(shell mpicxx --showme:link)
+	#mpicc
+	MPI_INC := $(shell mpicxx --showme:compile)
+	RAW_MPI_LIB := $(shell mpicxx --showme:link)
 
-  # Convert -Wl,-rpath,... into nvcc-friendly format
-  MPI_LIB := $(shell echo $(RAW_MPI_LIB) | sed 's/-Wl,/ -Xlinker /g' | sed 's/,/ -Xlinker /g')
+	# Convert -Wl,-rpath,... into nvcc-friendly format
+	MPI_LIB := $(shell echo $(RAW_MPI_LIB) | sed 's/-Wl,/ -Xlinker /g' | sed 's/,/ -Xlinker /g')
 
-  HOSTFLAGS += $(MPI_INC)
-  NVCCFLAGS += -DENABLE_PAR \
-                      $(MPI_INC) \
-                      -L${NETCDF_PATH}/lib64 -lnetcdf $(MPI_LIB)
-  # Append output_parallel.cpp when PARALLEL=1
-  OUT_CPP += $(IO_DIR)/output_parallel.cpp
+	HOSTFLAGS += $(MPI_INC)
+	NVCCFLAGS += -DENABLE_PAR \
+	                    $(MPI_INC) \
+	                    -L${NETCDF_PATH}/lib64 -lnetcdf $(MPI_LIB)
+	# Append output_parallel.cpp when PARALLEL=1
+	OUT_CPP += $(IO_DIR)/output_parallel.cpp
 else
-  NVCCFLAGS += -L${NETCDF_PATH}/lib64 -lnetcdf 
+	NVCCFLAGS += -L${NETCDF_PATH}/lib64 -lnetcdf 
 endif
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,6 +85,7 @@ endif
 SRC_MAIN_CU  := main.cpp
 SRC_HOST_CPP := model_registry.cpp
 SRC_IO_CPP   := $(IO_DIR)/parameters_loader.cpp \
+                $(IO_DIR)/forcing_loader.cpp \
                 $(OUT_CPP)
 
 # Temporarily disable ETmethods.cpp and soiltemp.cpp until host-device attributes are fixed
@@ -90,8 +93,9 @@ SRC_IO_CPP   := $(IO_DIR)/parameters_loader.cpp \
 SRC_UTIL_CPP :=
 
 SRC_CU       := $(SOLVER_DIR)/rk45_kernel.cu \
-                 $(SOLVER_DIR)/radau_kernel.cu \
-                 $(MODELS_DIR)/model_204_global.cu
+	               $(SOLVER_DIR)/radau_kernel.cu \
+	               $(MODELS_DIR)/model_204_global.cu \
+	               $(IO_DIR)/forcing_data.cu
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Object files
@@ -110,9 +114,12 @@ all: $(BIN)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Create object directories
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
 $(OBJ_DIR):
-	@mkdir -p $(OBJ_DIR) $(OBJ_DIR)/$(SOLVER_DIR) $(OBJ_DIR)/$(MODELS_DIR)
+	@mkdir -p $(OBJ_DIR) \
+	        $(OBJ_DIR)/$(SOLVER_DIR) \
+	        $(OBJ_DIR)/$(MODELS_DIR) \
+	        $(OBJ_DIR)/$(IO_DIR)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1) Compile main.cpp as CUDA (for <<<>>> kernels)
@@ -157,7 +164,7 @@ $(DEVICE_LINK): $(OBJ_DEVICE)
 # 7) Final link (omit OBJ_UTIL since ETmethods/soiltemp are disabled)
 # ─────────────────────────────────────────────────────────────────────────────
 $(BIN): $(OBJ_HOST) $(OBJ_IO) $(OBJ_DEVICE) $(DEVICE_LINK)
-	$(Q)$(NVCC) $(NVCCFLAGS) --relocatable-device-code=true $^ -o $@
+	$(Q)$(NVCC) $(NVCCFLAGS) --relocatable-device-code=true $^ -lcudadevrt -o $@
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Clean up
