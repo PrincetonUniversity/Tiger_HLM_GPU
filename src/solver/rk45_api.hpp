@@ -9,7 +9,25 @@
 #include "rk45.h"                   // For rk45_then_radau_multi<…> and radau_kernel_multi<…>
 #include "parameters_loader.hpp"    // for SpatialParams
 #include "models/model_204.hpp"     // For Model204::N_EQ, ::SP_TYPE, etc.
+#include "I_O/forcing_data.h"
 
+// ========== GLOBAL FORCING SYMBOLS ==========
+
+// device pointer to flattened [forcing][time][stream] data
+// extern float*  d_forc_data;
+// number of distinct NetCDF variables you’re forcing with
+// extern int     nForc;
+// per‐forcing time step (dt) in constant memory:
+//__constant__ double c_forc_dt[4];
+// per‐forcing number of time steps in constant memory:
+//__constant__ size_t c_forc_nT[4];
+
+// device pointers for forcing data and its count
+// __device__ float* d_forc_data_dev;
+// __device__ int    nForc_dev;
+
+
+// ────────────────────────────────────────────────
 // ────────── Forward‐declare your Radau‐only kernel ──────────
 // Must exactly match the definition in solver/radau_kernel.cu
 template <class Model>
@@ -25,7 +43,9 @@ void radau_kernel_multi(
     double                               tf,        // 8
     const typename Model::SP_TYPE* d_sp,       // 9
     int*                           stiff_system_indices,    // 10
-    int                                  n_stiff     // 11
+    int                                  n_stiff,     // 11
+    const float* d_forc_data,
+    int          nForc
 );
 
 
@@ -201,7 +221,9 @@ std::pair<FinalType, DenseType> retrieve_and_free(
             tf,               // 8
             d_sp,             // 9
             d_stiff_idxs,     // 10
-            n_stiff           // 11
+            n_stiff,           // 11
+            d_forc_data,
+            nForc              // number of forcings
           );
         cudaDeviceSynchronize();
         // launch‐error check
@@ -272,7 +294,9 @@ run_rk45(
       d_query_times, d_dense_all,
       d_stiff,              // new
       ns, nq, t0, tf,
-      d_sp
+      d_sp, // device‐constant pointer to spatial params
+      d_forc_data, // forcing data pointer
+      nForc         // number of forcings
     );
 
     // 3) retrieve, launch Radau on stiff systems, reorder, free
@@ -280,9 +304,11 @@ run_rk45(
       d_y0_all, d_y_final_all,
       d_query_times, d_dense_all,
       d_stiff,             // new
+      //d_forc_data,   // ← host obtains this before
+      //snForc,         // ← and this too
       ns, nq,
       t0, tf,
-      d_sp
+      d_sp, d_forc_data, nForc
     );
 }
 

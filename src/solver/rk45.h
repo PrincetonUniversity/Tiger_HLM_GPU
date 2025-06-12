@@ -59,9 +59,9 @@ __global__ void rk45_then_radau_multi(
     double  t0,                 // initial time of integration
     double  tf,                 // final time of integration
     const typename Model::SP_TYPE* d_sp,
-    int*    d_stiff             // NEW: flags for stiffness detection
-    //const SpatialParams* d_sp   // pointer to device constant array of spatial parameters
-    //const SpatialParams* sp_ptr 
+    int*    d_stiff,            // NEW: flags for stiffness detection
+    const float*  d_forc_data,  // ★ new
+    int           nForc        // ★ new: number of forcings
     
 );
 

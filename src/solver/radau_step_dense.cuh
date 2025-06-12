@@ -11,10 +11,11 @@ static constexpr double SQRT6 = 2.449489742783178;
  * If Model::jacobian isn't available, approximate ∂f/∂y by finite differences.
  */
 template<class Model>
-__device__ void approx_jacobian(double t, const double* y, double J[Model::N_EQ][Model::N_EQ], int sys_id, const typename Model::SP_TYPE* d_sp) {
+__device__ void approx_jacobian(double t, const double* y, double J[Model::N_EQ][Model::N_EQ], int sys_id, const typename Model::SP_TYPE* d_sp, 
+                                const float* d_forc_data, int nForc) {
     constexpr int N = Model::N_EQ;
     double f0[N], f1[N];
-    Model::rhs(t, y, f0, N, sys_id, d_sp);
+    Model::rhs(t, y, f0, N, sys_id, d_sp, d_forc_data, nForc);
     const double eps = sqrt(1e-16);
     for (int j = 0; j < N; ++j) {
         double yj = y[j];
@@ -22,7 +23,7 @@ __device__ void approx_jacobian(double t, const double* y, double J[Model::N_EQ]
         double ytmp[N];
         for (int i = 0; i < N; ++i) ytmp[i] = y[i];
         ytmp[j] += h_eps;
-        Model::rhs(t, ytmp, f1, N, sys_id, d_sp);
+        Model::rhs(t, ytmp, f1, N, sys_id, d_sp, d_forc_data, nForc);
         for (int i = 0; i < N; ++i) {
             J[i][j] = (f1[i] - f0[i]) / h_eps;
         }
@@ -47,7 +48,9 @@ __device__ void radau_step(
     double*       error_norm,
     double        /*k_unused*/[7][Model::N_EQ],  // dummy
     int           sys_id,
-    const typename Model::SP_TYPE* d_sp
+    const typename Model::SP_TYPE* d_sp,
+    const float*  d_forc_data,  // forcing data
+    int           nForc         // number of forcings
 ) {
     constexpr int N = Model::N_EQ;
 
@@ -76,7 +79,7 @@ __device__ void radau_step(
     // 1) Allocate and initialize stage increments Z[s][i]
     double Z[3][N];
     double f0[N];
-    Model::rhs(t, y, f0, N, sys_id, d_sp);
+    Model::rhs(t, y, f0, N, sys_id, d_sp, d_forc_data, nForc);
     for (int s = 0; s < 3; ++s)
         for (int i = 0; i < N; ++i)
             Z[s][i] = f0[i];
@@ -98,7 +101,7 @@ __device__ void radau_step(
             #ifdef HAS_MODEL_JACOBIAN
                 Model::jacobian(t + c[s]*h, Yi, J);
             #else
-                approx_jacobian<Model>(t + c[s]*h, Yi, J, sys_id, d_sp);
+                approx_jacobian<Model>(t + c[s]*h, Yi, J, sys_id, d_sp, d_forc_data, nForc);
             #endif
 
             // Fill block row s of Mmat and rhs
@@ -117,7 +120,7 @@ __device__ void radau_step(
                 }
             }
             double fs[N];
-            Model::rhs(t + c[s]*h, Yi, fs, N, sys_id, d_sp);
+            Model::rhs(t + c[s]*h, Yi, fs, N, sys_id, d_sp,d_forc_data, nForc);
             for (int i = 0; i < N; ++i) {
                 rhs[s*N + i] = -Z[s][i] + fs[i];
             }

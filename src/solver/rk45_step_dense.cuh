@@ -42,7 +42,9 @@ __device__ void rk45_step(
     double* error_norm,                  // ∞-norm error estimate
     double k[7][Model::N_EQ],             // stage slopes (output)
     int sys_id,                           // passing stream ID here
-    const typename Model::SP_TYPE* d_sp  // spatial parameters (if needed by Model::rhs)
+    const typename Model::SP_TYPE* d_sp,  // spatial parameters (if needed by Model::rhs)
+    const float* Fval_arr,               // ★ new: forcing values at current time t
+    int nForc                          // ★ new: number of forcings      
 ) {
     constexpr int N_EQ = Model::N_EQ;
 
@@ -99,7 +101,9 @@ __device__ void rk45_step(
             y_temp[i] = acc;
         }
         // Evaluate the RHS at t + c[s]*h, storing the slope into k[s]
-        Model::rhs(t + c[s] * h, y_temp, k[s], N_EQ, sys_id, d_sp);
+        Model::rhs(t + c[s] * h, y_temp, k[s], N_EQ, sys_id, d_sp, 
+                   Fval_arr, nForc); // forward in-kernel forcing array and count
+
     }
 
     // ─── Stage 3: Build y_out (5th‐order) ───
@@ -172,6 +176,8 @@ __device__ void rk45_dense(
     double        h,                  // Step size used in that step
     double        theta,              // Normalized time in (0,1], theta = (t - t_n)/h
     double*       y_dense             // Output: y(t_n + theta·h), size = N_EQ
+    //const float* Fval_arr,            // ★ new: forcing values at current time t
+   // int         nForc                 // ★ new: number of forcings
 ) {
     constexpr int N_EQ = Model::N_EQ;
 

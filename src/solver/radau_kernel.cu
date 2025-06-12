@@ -8,6 +8,9 @@
 #include "event_detector.cuh"   // reuse norm_inf, norm_inf_diff if needed
 //#include "models/active_model.hpp"   // defines Model204 and extern __constant__ devParams
 #include "models/model_204.hpp" // brings in Model204
+#include "I_O/forcing_data.h"
+
+
 
 // -----------------------------------------------------------------------------
 // Implementation of radau_kernel_multi defined in radau_kernel.cuh
@@ -26,56 +29,28 @@ __global__ void radau_kernel_multi(
     double  tf,
     const typename Model204::SP_TYPE* d_sp,
     int*    stiff_system_indices,
-    int     n_stiff
+    int     n_stiff,
+    const float*  d_forc_data,  // ★ new
+    int nForc        // ★ new: number of forcings
 )
     
   {
     constexpr int N_EQ = Model204::N_EQ;
 
-    // // Identify which system this thread integrates
-    // int sys_id = blockIdx.x * blockDim.x + threadIdx.x;
-    // if (sys_id >= num_systems) return;
 
-    // if (idx == 0) {
-    // printf("Radau kernel running on systems: ");
-    // for (int i = 0; i < n_stiff; ++i) printf("%d ", stiff_system_indices[i]);
-    // printf("\n");
-    // }
-
-
-    // ─── DEBUG CHECK: only print once from sys_id == 0 ───
-    // if (sys_id == 0) {
-    //     printf("RADAU KERNEL: num_systems = %d, num_queries = %d\n", num_systems, num_queries);
-    // }
-    // ─────────────────────────────────────────────────────────
-
-    // 1) Map thread → index in the stiff list
+    // Map thread → index in the stiff list
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n_stiff) return;
     int sys_id = stiff_system_indices[idx];
-
-    // 2) One‐time debug print
-    if (idx == 0) {
-        printf("Radau on systems:");
-        for (int i = 0; i < n_stiff; ++i) printf(" %d", stiff_system_indices[i]);
-        printf("\n");
-    }
 
     // Load tolerances and initial step from constant memory
     double my_rtol = devParams.rtol;
     double my_atol = devParams.atol;
     double h       = devParams.initialStep;
+    double t       = t0;
 
-    // ─── Integration state ───
-    double t = t0;
-
-    // Allocate registers for state, next state, and a dummy k
-    double y[N_EQ], y_next[N_EQ];
-    // we don't use explicit k, but radau_step expects a dummy array
-    double k_dummy[7][N_EQ];
-    double error_norm = 0.0;
-
-    // Load initial condition
+    // Load initial condition & set up state buffers
+    double y[N_EQ], y_next[N_EQ], k_dummy[7][N_EQ], error_norm;
     for (int i = 0; i < N_EQ; ++i) {
         y[i] = y0_all[sys_id * N_EQ + i];
     }
@@ -88,8 +63,32 @@ __global__ void radau_kernel_multi(
         // adjust final step if needed
         if (t + h > tf) h = tf - t;
 
+        // ─── gather forcings *at current t* ───
+        // pick the value corresponding to the current time t for each forcing j
+        float Fval_arr[MAX_FORCINGS];
+        for (int j = 0; j < nForc; ++j) {
+            // compute where we are in the forcing time series as a real number
+            double sampleIdxReal = t / c_forc_dt[j];
+            // how many total time steps we loaded for this forcing
+            size_t nSamples = c_forc_nT[j];
+            // convert to an index between 0 and nSamples-1:
+            // - if sampleIdxReal is below zero, use 0
+            // - if it's beyond the last step, use the last index
+            // - otherwise, drop the decimal part to get a whole number
+            size_t sampleIdx = (sampleIdxReal < 0.0 
+                                ? 0 
+                                : sampleIdxReal >= nSamples 
+                                    ? nSamples - 1 
+                                    : size_t(sampleIdxReal));
+            // calculate where forcing j’s block starts in the big array
+            size_t base = size_t(j) * (nSamples * num_systems);
+            // pick the value for this particular stream (thread) at time sampleIdx
+            Fval_arr[j] = d_forc_data[ base + sampleIdx * num_systems + sys_id ];
+        }
+
         // Take one Radau step (fills y_next and error_norm)
-        radau_step<Model204>(t, y, y_next, N_EQ, h, my_rtol, my_atol, &error_norm, k_dummy, sys_id, d_sp);
+        Model204::rhs(t, y, k_dummy[0], N_EQ, sys_id, d_sp, Fval_arr, nForc);
+        radau_step<Model204>(t, y, y_next, N_EQ, h, my_rtol, my_atol, &error_norm, k_dummy, sys_id, d_sp, d_forc_data, nForc);
 
         // Accept or reject based on embedded error
         if (error_norm <= 1.0) {
@@ -148,6 +147,7 @@ template __global__ void radau_kernel_multi<Model204>(
     int, int, double, double,
     const typename Model204::SP_TYPE*, 
     int*,     // stiff_system_indices
-    int       // n_stiff
+    int,       // n_stiff
+    const float*, // d_forc_data      // forcing data
+    int         // nForc               // number of forcings
 );
-
