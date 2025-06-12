@@ -18,7 +18,7 @@
 //#include "models/active_model.hpp"   // defines Model204 alias & __constant__ devParams
 #include "parameters_loader.hpp"     // CSV loader for SpatialParams
 
-// #include <mpi.h>
+#include <mpi.h>
 #include "output_series.hpp"          // series output to netcdf (serial version). ALWAYS INCLUDE
 
 #include "chrono" // for timing
@@ -707,8 +707,8 @@ int main(int argc, char** argv) {
     for (int v = 0; v < N_EQ; ++v) state_vals[v] = v;
 
     //Netcdf file attributes (will be defined in yaml)
-    std::string dense_filename = "/scratch/gpfs/mb6477/Tiger_HLM_GPU/outputs/dense_example.nc";
-    std::string final_filename = "/scratch/gpfs/mb6477/Tiger_HLM_GPU/outputs/final_example.nc";
+    std::string dense_filename = "/scratch/gpfs/am2192/dense_example.nc";
+    std::string final_filename = "/scratch/gpfs/am2192/final_example.nc";
     int compression_level = 0;
 
     // Write only the final time step (2D output)
