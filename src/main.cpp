@@ -25,6 +25,7 @@
 //''#endif
 #include "output_series.hpp"          // series output to netcdf (serial version). ALWAYS INCLUDE
 
+#include "chrono" // for timing
 
 #include "models/model_204.hpp"      // brings in SpatialParams
 #include "stream.hpp"                // Stream<Model> wrapper (id, next_id, SpatialParams, y0)
@@ -282,7 +283,7 @@ int main(int argc, char** argv) {
     using namespace rk45_api;
 
     // ───────── 0) load per‐stream spatial parameters ─────────
-    auto spatialParams = loadSpatialParams("../data/small_test.csv");
+    auto spatialParams = loadSpatialParams("../data/small_test.csv");//10 links
     
     // Query one of the NetCDF files for its spatial dimensions
     NetCDFLoader prLoader("../data/pr_hourly_era5land_2019.nc", "pr");
@@ -710,9 +711,9 @@ int main(int argc, char** argv) {
     for (int v = 0; v < N_EQ; ++v) state_vals[v] = v;
 
     //Netcdf file attributes (will be defined in yaml)
-    std::string dense_filename = "dense_example.nc";
-    std::string final_filename = "final_example.nc";
-    int compression_level = 4;
+    std::string dense_filename = "/scratch/gpfs/mb6477/Tiger_HLM_GPU/outputs/dense_example.nc";
+    std::string final_filename = "/scratch/gpfs/mb6477/Tiger_HLM_GPU/outputs/final_example.nc";
+    int compression_level = 0;
 
     // Write only the final time step (2D output)
     write_final_netcdf(final_filename,
@@ -722,6 +723,22 @@ int main(int argc, char** argv) {
                     num_systems,
                     N_EQ,
                     compression_level);
+
+    auto start = std::chrono::high_resolution_clock::now();
+    write_dense_netcdf(dense_filename,
+                    h_dense.data(),
+                    h_query_times.data(),
+                    linkid_vals.data(),
+                    state_vals.data(),
+                    num_queries,
+                    num_systems,
+                    N_EQ,
+                    compression_level);
+    std::cout << "Write out finished" << std::endl;
+
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    std::cout << "write_dense_netcdf took " << elapsed.count() << " seconds.\n";
 
     // !!! PARALLEL SWITCH FOR OUTPUT
     #ifdef ENABLE_PAR
@@ -791,15 +808,15 @@ int main(int argc, char** argv) {
 
     #else
         // Write dense (3D)
-        write_dense_netcdf(dense_filename,
-                        h_dense.data(),
-                        h_query_times.data(),
-                        linkid_vals.data(),
-                        state_vals.data(),
-                        num_queries,
-                        num_systems,
-                        N_EQ,
-                        compression_level);
+        // write_dense_netcdf(dense_filename,
+        //                 h_dense.data(),
+        //                 h_query_times.data(),
+        //                 linkid_vals.data(),
+        //                 state_vals.data(),
+        //                 num_queries,
+        //                 num_systems,
+        //                 N_EQ,
+        //                 compression_level);
     #endif
 
     return 0;
