@@ -194,6 +194,43 @@ std::unique_ptr<float[]> NetCDFLoader::loadTimeChunk(size_t startTime, size_t nu
     
     return data;
 }
+
+// Load data by any chunk: time/lat/lon into memory
+std::unique_ptr<float[]> NetCDFLoader::loadChunk(size_t startTime, size_t numTime, 
+                                                  size_t startLat, size_t numLat, 
+                                                  size_t startLon, size_t numLon) {
+    // Check if chunk is out of bounds
+    if (numTime == 0 || numLat == 0 || numLon == 0) {
+        throw std::invalid_argument("Size of chunk dimensions must be greater than zero");
+    }
+    if (startTime >= timeSize || startLat >= latSize || startLon >= lonSize) {
+        throw std::out_of_range("Start indices out of range");
+    }
+    if (startTime + numTime > timeSize || startLat + numLat > latSize || startLon + numLon > lonSize) {
+        throw std::out_of_range("Requested chunk exceeds available data");
+    }
+    
+    // Calculate total elements in the chunk
+    size_t totalElements = numTime * numLat * numLon;
+    
+    // Allocate memory for the chunk
+    std::unique_ptr<float[]> data = std::make_unique<float[]>(totalElements);
+    
+    // Define start and count arrays for subsetting
+    size_t start[3] = {startTime, startLat, startLon};
+    size_t count[3] = {numTime, numLat, numLon};
+    
+    // Read data from NetCDF file using C API
+    int status = nc_get_vara_float(ncid, varid, start, count, data.get());
+    checkError(status, "Reading variable data");
+    
+    std::cout << "Loaded chunk: time steps " << startTime << " to "
+              << (startTime + numTime - 1) << ", lat " << startLat << " to "
+              << (startLat + numLat - 1) << ", lon " << startLon << " to "
+              << (startLon + numLon - 1) << std::endl;
+    
+    return data;
+}
  
 // Get a single value from pre-loaded chunk data
 float NetCDFLoader::getValueFromChunk(const std::unique_ptr<float[]>& chunkData,
@@ -211,8 +248,4 @@ float NetCDFLoader::getValueFromChunk(const std::unique_ptr<float[]>& chunkData,
     size_t index = relativeTimeIndex * (latSize * lonSize) + latIndex * lonSize + lonIndex;
     return chunkData[index];
 }
- 
-// Check if data is loaded correctly
-bool NetCDFLoader::isDataLoaded() const {
-    return ncid >= 0 && timeSize > 0 && latSize > 0 && lonSize > 0;
-}
+

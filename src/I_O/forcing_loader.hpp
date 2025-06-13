@@ -2,7 +2,6 @@
 #pragma once
 
 #include <netcdf.h>
-//#include <netcdf_par.h>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -59,9 +58,12 @@ public:
  
     // Load data by time chunk into memory
     std::unique_ptr<float[]> loadTimeChunk(size_t startTime, size_t numTimeSteps);
+
+    // Load data by any chunk: time/lat/lon into memory
+    std::unique_ptr<float[]> loadChunk(size_t startTime, size_t numTime,    // start index of time dimension, number of time steps in loading chunk
+                                       size_t startLat, size_t numLat,
+                                       size_t startLon, size_t numLon);
  
-    // Check if data is loaded correctly
-    bool isDataLoaded() const;
  
     // Getters
     size_t getTimeSize() const { return timeSize; }
@@ -69,12 +71,7 @@ public:
     size_t getLonSize() const { return lonSize; }
     std::string getVariableName() const { return varName; }
     std::string getFileName() const { return fileName; }
- 
-    // Get value at a specific time, latitude, and longitude, in the loaded time chunk
-    // static float getValueFromChunk(const std::unique_ptr<float[]>& chunkData,
-    //                           size_t relativeTimeIndex,  
-    //                           size_t latIndex, size_t lonIndex,
-    //                           size_t latSize, size_t lonSize);
+
                               
     float getValueFromChunk(const std::unique_ptr<float[]>& chunkData,
                        size_t relativeTimeIndex, // 0 to chunkSize-1: position within the loaded chunk

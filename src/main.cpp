@@ -279,7 +279,13 @@ int main(int argc, char** argv) {
     using namespace rk45_api;
 
     // ───────── 0) load per‐stream spatial parameters ─────────
-    auto spatialParams = loadSpatialParams("../data/small_test.csv");//10 links
+    auto spatialParams = loadSpatialParams("../data/small_test.csv"); //10 links - this is a vector of the struct <SpatialParams>
+
+    // print the value of spatialParams for debugging
+    for (const auto &sp : spatialParams) {
+        std::cout << "stream " << sp.stream << std::endl; 
+    }
+    
     
     // Query one of the NetCDF files for its spatial dimensions
     NetCDFLoader prLoader("../data/pr_hourly_era5land_2019.nc", "pr");
@@ -434,7 +440,7 @@ int main(int argc, char** argv) {
     std::vector<size_t> h_forc_nT;
     h_forc_dt .reserve(nForc);
     h_forc_nT .reserve(nForc);
-    h_forc_data.reserve(nForc * num_systems * 48);
+    h_forc_data.reserve(nForc * num_systems * 48);    // 2 forcings * 10 links * 48 hours - create repeated data problem
 
     constexpr double daysToLoad = 2.0;  // grab only first 2 days
 
@@ -463,7 +469,7 @@ int main(int argc, char** argv) {
     }
 
     // C) Upload to device
-    float* d_forc_ptr = nullptr;
+    float* d_forc_ptr = nullptr;    // device forcing pointer
     cudaMalloc(&d_forc_ptr, sizeof(float) * h_forc_data.size());
     cudaMemcpy(d_forc_ptr,
             h_forc_data.data(),
@@ -586,11 +592,10 @@ int main(int argc, char** argv) {
             nq)
         = setup_gpu_buffers<Model204>(h_y0, h_query_times);
 
-
     // ───────── Diagnostic launch + checks ─────────
     const int THREADS_PER_BLOCK = 128;
     int numBlocks = (ns + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    dim3 blocks(numBlocks), threads(THREADS_PER_BLOCK);
+    dim3 blocks(1,numBlocks,numBlocks), threads(1,4,4);
 
     std::printf("Launching kernel with %d blocks, %d threads/block (ns=%d)\n",
                 numBlocks, THREADS_PER_BLOCK, ns);
@@ -689,11 +694,14 @@ int main(int argc, char** argv) {
     // ───────── Print a quick summary ─────────
     std::printf("Final states at t = %.1f:\n", tf);
     for (int s = 0; s < num_systems; ++s) {
-        std::printf(" System %d:", s);
-        for (int i = 0; i < Model204::N_EQ; ++i) {
+        if (s % 1 == 0) {
+            std::printf(" System %d:", s);
+            
+            for (int i = 0; i < Model204::N_EQ; ++i) {
             std::printf(" y%d=%.6f", i, h_y_final[s * Model204::N_EQ + i]);
         }
         std::printf("\n");
+        }
     }
 
     // ———————————————————————————————— 
@@ -707,8 +715,8 @@ int main(int argc, char** argv) {
     for (int v = 0; v < N_EQ; ++v) state_vals[v] = v;
 
     //Netcdf file attributes (will be defined in yaml)
-    std::string dense_filename = "/scratch/gpfs/am2192/dense_example.nc";
-    std::string final_filename = "/scratch/gpfs/am2192/final_example.nc";
+    std::string dense_filename = "./dense_example.nc";
+    std::string final_filename = "./final_example.nc";
     int compression_level = 0;
 
     // Write only the final time step (2D output)
