@@ -261,6 +261,10 @@ int main(int argc, char** argv) {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
+    // Get gpu count
+    int gpuCount = 0;
+    cudaGetDeviceCount(&gpuCount);
+
     // Rank zero splits the spatial params into sections (!!! need to change to spatial chunking !!!)  
     if(rank==0){
 
@@ -304,6 +308,16 @@ int main(int argc, char** argv) {
     
     }
     if(rank >= 1 && rank < size) { //!!!! NEED TO CHANGE size to nGPUs
+
+        // ────────── Set the GPU device for this rank ──────────
+        
+        if(gpuCount < rank){
+            cudaSetDevice(0);
+        }else{
+            // Assign GPU i as rank - 1
+            cudaSetDevice(rank - 1);
+        }
+
         // ───────── Print GPU properties ─────────
         int dev;
         cudaGetDevice(&dev);
@@ -311,6 +325,15 @@ int main(int argc, char** argv) {
         cudaGetDeviceProperties(&prop, dev);
         std::printf("Running on GPU %s (SM %d.%d)\n",
                     prop.name, prop.major, prop.minor);
+
+        // Print UUID in standard format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        std::printf("GPU UUID: ");
+        for (int i = 0; i < 16; ++i) {
+            std::printf("%02x", (unsigned char)prop.uuid.bytes[i]);
+            if (i == 3 || i == 5 || i == 7 || i == 9)
+                std::printf("-");
+        }
+        std::printf("\n");
         // _____________ end checking GPU properties _______________
 
         // ───────── Test that even a trivial kernel will launch ─────────
