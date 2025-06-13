@@ -48,16 +48,8 @@ root/
 Load the required CUDA toolkit using the following command:
 
 ```
+#for della gpu or gh use these as standard
 module load cudatoolkit/12.9
-
-
-#for della-gpu 
-module load gcc-toolset/14
-module load aocc/5.0.0
-module load hdf5/aocc-5.0.0/1.14.4
-module load netcdf/aocc-5.0.0/hdf5-1.14.4/4.9.2
-
-#for gh
 module load openmpi/gcc/4.1.6
 module load hdf5/gcc/openmpi-4.1.6/1.14.4
 module load netcdf/gcc/hdf5-1.14.4/openmpi-4.1.6/4.9.2
@@ -118,3 +110,15 @@ cudaMemcpyToSymbol(NewModel::devParams, &hostParams, sizeof(hostParams));
 ```
 
 so the GPU uses those tolerances instead of hard-coded values.
+
+
+# 6. Splitting data
+In the main.cpp rank 0 is used to split the parameters by the number of gpus (right now just the number of ranks minus one). 
+
+
+**della-gh**
+command line: mpirun -np 2 ./rk45_solver (for now only one gpu)
+
+for nsight info: mpirun -np 2 nsys profile --trace=cuda,mpi --stats=true --output=rk45_profile_%q{OMPI_COMM_WORLD_RANK} rk45_solver
+
+

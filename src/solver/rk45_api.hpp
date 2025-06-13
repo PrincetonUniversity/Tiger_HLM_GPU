@@ -202,10 +202,10 @@ std::pair<FinalType, DenseType> retrieve_and_free(
         cudaMalloc(&d_stiff_idxs, sizeof(int)*n_stiff);
         cudaMemcpy(d_stiff_idxs, stiff_idxs.data(), sizeof(int)*n_stiff, cudaMemcpyHostToDevice);
 
-        // Debug print
-        printf("Stiff systems:");
-        for (int id : stiff_idxs) printf(" %d", id);
-        printf("\n");
+        // // Debug print
+        // printf("Stiff systems:");
+        // for (int id : stiff_idxs) printf(" %d", id);
+        // printf("\n");
 
         constexpr int TPB = 128;
         int blocks2 = (n_stiff + TPB - 1) / TPB;

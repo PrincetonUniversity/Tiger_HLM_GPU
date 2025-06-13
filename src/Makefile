@@ -28,10 +28,9 @@ DEVICE_INCLUDES := -I. -I$(SOLVER_DIR) -I$(MODELS_DIR) -I$(IO_DIR)
 NVCCFLAGS := -std=c++17 -rdc=true \
   -gencode arch=compute_80,code=compute_80 \
   -gencode arch=compute_80,code=sm_80 \
-  $(DEVICE_INCLUDES) -DUSE_MODEL_204 -Wno-deprecated-gpu-targets \
-  -L${NETCDF_PATH}/lib64 -lnetcdf 
+  $(DEVICE_INCLUDES) -DUSE_MODEL_204 -Wno-deprecated-gpu-targets
 
-# Compiler flags (della-gh)
+# #Compiler flags (della-gh)
 # NVCCFLAGS := -std=c++17 -rdc=true \
 # 	-gencode arch=compute_90,code=compute_90 \
 # 	-gencode arch=compute_90,code=sm_90 \
@@ -63,8 +62,8 @@ NVCCFLAGS += -L${NETCDF_PATH}/lib64 -lnetcdf $(MPI_LIB)
 MPI_INC := $(shell mpicxx --showme:compile)
 RAW_MPI_LIB := $(shell mpicxx --showme:link)
 MPI_LIB := $(shell echo $(RAW_MPI_LIB) | sed 's/-Wl,/ -Xlinker /g' | sed 's/,/ -Xlinker /g')
-HOSTFLAGS += $(MPI_INC)
-NVCCFLAGS += $(MPI_INC)
+HOSTFLAGS += $(MPI_INC) $(MPI_LIB)
+NVCCFLAGS += $(MPI_INC) $(MPI_LIB)
 					
 # ─────────────────────────────────────────────────────────────────────────────
 # Source lists
@@ -128,13 +127,16 @@ $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4) Compile ETmethods.cpp & soiltemp.cpp (disabled)
+# SRC_UTIL_CPP := $(MODELS_DIR)/ETmethods.cpp $(MODELS_DIR)/soiltemp.cpp
 # /*
+$(OBJ_DIR)/ETmethods.o: $(MODELS_DIR)/ETmethods.cpp | $(OBJ_DIR) \
+    $(Q)$(NVCC) $(NVCCFLAGS) -x cu -dc -c $< -o $@
+$(OBJ_DIR)/soiltemp.o: $(MODELS_DIR)/soiltemp.cpp | $(OBJ_DIR) \
+    $(Q)$(NVCC) $(HOSTFLAGS) -x cu -dc -c $< -o $@
 # $(OBJ_DIR)/ETmethods.o: $(MODELS_DIR)/ETmethods.cpp | $(OBJ_DIR)
-# 	$(Q)$(NVCC) $(HOSTFLAGS) -dc -c $< -o $@
-
+#   $(Q)$(NVCC) $(HOSTFLAGS) -dc -c $< -o $@
 # $(OBJ_DIR)/soiltemp.o: $(MODELS_DIR)/soiltemp.cpp | $(OBJ_DIR)
-# 	$(Q)$(NVCC) $(HOSTFLAGS) -dc -c $< -o $@
-# */
+#   $(Q)$(NVCC) $(HOSTFLAGS) -dc -c $< -o $@
 # ─────────────────────────────────────────────────────────────────────────────
 # 5) Compile .cu solver files to relocatable objects
 # ─────────────────────────────────────────────────────────────────────────────

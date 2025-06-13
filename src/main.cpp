@@ -254,487 +254,575 @@ __global__ void debugRHS(const SpatialParams* sp, int sys_id) {
 
 int main(int argc, char** argv) {
 
-    // ───────── Print GPU properties ─────────
-    int dev;
-    cudaGetDevice(&dev);
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, dev);
-    std::printf("Running on GPU %s (SM %d.%d)\n",
-                prop.name, prop.major, prop.minor);
-    // _____________ end checking GPU properties _______________
+    // Initialize MPI 
+    MPI_Init(&argc, &argv);
+    int size;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    // ───────── Test that even a trivial kernel will launch ─────────
-    testKernel<<<1,1>>>();
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "testKernel launch failed: %s\n",
-                    cudaGetErrorString(err));
-    } else {
-        std::puts("testKernel launch: OK");
-    }
-    cudaDeviceSynchronize();
+    // Get gpu count
+    int gpuCount = 0;
+    cudaGetDeviceCount(&gpuCount);
 
+    // Rank zero splits the spatial params into sections (!!! need to change to spatial chunking !!!)  
+    if(rank==0){
 
+        //load in all links
+        auto spatialParams = loadSpatialParams("../data/small_example_params.csv");        
 
-    using namespace rk45_api;
+        // Calculate chunk size for even splitting
+        int totalRanks = size - 1; // Exclude rank 0
+        int totalRows = spatialParams.size();
+        int baseChunk = totalRows / totalRanks;
+        int remainder = totalRows % totalRanks;
 
-    // ───────── 0) load per‐stream spatial parameters ─────────
-    auto spatialParams = loadSpatialParams("../data/small_test.csv");//10 links
+        int start = 0;
+
+        std::cout << "Total rows: " << totalRows << std::endl;
+        std::cout << "Total ranks: " << totalRanks << std::endl;
+
+        for (int r = 1; r <= totalRanks; ++r) {
+            // Calculate actual chunk size for this rank
+            int chunkSize = baseChunk + (r <= remainder ? 1 : 0);
+            int end = start + chunkSize;
+
+            // Ensure we don't go out of bounds
+            if (end > totalRows) end = totalRows;
+
+            // Slice the vector
+            std::vector<SpatialParams> subset(spatialParams.begin() + start, spatialParams.begin() + end);
+            int count = subset.size();
+
+            std::cout << "Sending " << count << " SpatialParams to rank " << r << std::endl;
+
+            // Send count first
+            MPI_Send(&count, 1, MPI_INT, r, 0, MPI_COMM_WORLD);
+
+            // Send the raw data
+            MPI_Send(subset.data(), count * sizeof(SpatialParams), MPI_BYTE, r, 1, MPI_COMM_WORLD);
+
+            // Move to next chunk
+            start = end;
+        }
     
-    // Query one of the NetCDF files for its spatial dimensions
-    NetCDFLoader prLoader("../data/pr_hourly_era5land_2019.nc", "pr");
-    size_t lat_size = prLoader.getLatSize();
-    size_t lon_size = prLoader.getLonSize();
-
-    // build a vector of Stream<Model204>, using a common y0
-    std::array<double, Model204::N_EQ> y0_common = {0.01, 3.0, 0.0, 5.0, 0.2};
-    std::vector< Stream<Model204> > streams;
-    streams.reserve(spatialParams.size());
-    for (auto const &sp : spatialParams) {
-        streams.emplace_back(sp, y0_common);
     }
-    int num_systems = int(streams.size());
+    if(rank >= 1 && rank < size) { //!!!! NEED TO CHANGE size to nGPUs
 
-    // ────────── Debug: copy SpatialParams to device and verify ──────────
-    std::vector<SpatialParams> hostSP;
-    hostSP.reserve(num_systems);
-    for (auto const &st : streams) {
-        hostSP.push_back(st.sp);
-    }
-    size_t byteCount = num_systems * sizeof(SpatialParams);
-
-    SpatialParams* d_sp = nullptr;
-    //cudaError_t err = cudaMalloc(&d_sp, byteCount);
-    err = cudaMalloc(&d_sp, byteCount);
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "cudaMalloc(d_sp) failed: %s\n", cudaGetErrorString(err));
-        return 1;
-    }
-
-    err = cudaMemcpy(d_sp, hostSP.data(), byteCount, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "cudaMemcpy(d_sp) failed: %s\n", cudaGetErrorString(err));
-        return 1;
-    }
-
-    // Host‐side round‐trip check (first element)
-    SpatialParams check0;
-    err = cudaMemcpy(&check0, d_sp, sizeof(SpatialParams), cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "cudaMemcpy back failed: %s\n", cudaGetErrorString(err));
-    } else {
-        std::printf("HOST→DEVICE round-trip: stream=%ld, Hu=%g, infil=%g, perco=%g\n",
-                    check0.stream, check0.Hu, check0.infil, check0.perco);
-    }
-
-    // ─── Debugging full host→device→host compare ───────────────────────────
-    {
-        std::vector<SpatialParams> hostCheck(num_systems);
-        err = cudaMemcpy(hostCheck.data(), d_sp, byteCount, cudaMemcpyDeviceToHost);
-        if (err != cudaSuccess) {
-            std::fprintf(stderr, "Full round-trip cudaMemcpy back failed: %s\n", cudaGetErrorString(err));
-        } else {
-            for (int i = 0; i < num_systems; ++i) {
-                const auto &in  = hostSP[i];
-                const auto &out = hostCheck[i];
-                if (in.stream != out.stream ||
-                    fabs(in.Hu - out.Hu)       > 1e-12 ||
-                    fabs(in.infil - out.infil) > 1e-12 ||
-                    fabs(in.perco - out.perco) > 1e-12
-                    /* add more fields if desired */
-                ) {
-                    std::fprintf(stderr,
-                        "Mismatch at idx %d: CSV(stream=%ld,Hu=%g,...) vs GPU(stream=%ld,Hu=%g,...)\n",
-                        i,
-                        in.stream, in.Hu,
-                        out.stream, out.Hu
-                    );
-                }
-            }
+        // ────────── Set the GPU device for this rank ──────────
+        
+        if(gpuCount < rank){
+            cudaSetDevice(0);
+        }else{
+            // Assign GPU i as rank - 1
+            cudaSetDevice(rank - 1);
         }
-    }
 
-    // ──── ended debugging ──────────────────────────────────────────────────────
+        // ───────── Print GPU properties ─────────
+        int dev;
+        cudaGetDevice(&dev);
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, dev);
+        std::printf("Running on GPU %s (SM %d.%d)\n",
+                    prop.name, prop.major, prop.minor);
 
-    // Populate the device‐constant pointer so kernels see it
-    err = cudaMemcpyToSymbol(devSpatialParamsPtr, &d_sp, sizeof(d_sp));
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "cudaMemcpyToSymbol(devSpatialParamsPtr) failed: %s\n",
-                    cudaGetErrorString(err));
-        return 1;
-    }
-
-    // ─────── DebugRHS: verify Model204::rhs uses the right parameters ───────
-    {
-        int target_sys = 0;                // choose the stream index to inspect
-        debugRHS<<<1,1>>>(d_sp, target_sys);
-        cudaDeviceSynchronize();
-    }
-
-    // // ────Debugging: launch debugAllParams to print every stream ─────────
-    // {
-    //     int dbgThreads = 32;
-    //     int dbgBlocks  = (num_systems + dbgThreads - 1) / dbgThreads;
-    //     debugAllParams<<<dbgBlocks, dbgThreads>>>(d_sp, num_systems);
-    //     err = cudaDeviceSynchronize();
-    //     if (err != cudaSuccess) {
-    //         std::fprintf(stderr, "debugAllParams kernel failed: %s\n", cudaGetErrorString(err));
-    //     } else {
-    //         std::puts("debugAllParams kernel ran successfully");
-    //     }
-    // }
-    // ───────── ended debugging ────────────────────────────────────────────────────────
-
-    // Verify via checkDevParamsKernel204
-    checkDevParamsKernel204<<<1,1>>>();
-    err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "checkDevParamsKernel204 failed: %s\n",
-                    cudaGetErrorString(err));
-        return 1;
-    }
-
-    // Launch the tiny debugParams kernel
-    debugParams<<<1,32>>>(d_sp);
-    err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "debugParams kernel failed: %s\n", cudaGetErrorString(err));
-    } else {
-        std::puts("debugParams kernel ran successfully!!!");
-    }
-    // ───────── end debugging spatial params ────────────────────────────────────
-
-
-    // ─── Build streamPoint lookup ─────────────────────────────────────────
-    LookupMapper lm("../data/small_example_pr_lookup.csv");
-    if (!lm.load()) {
-        std::cerr << "Lookup load failed\n";
-        return 1;
-    }
-    // one flat index per system
-    std::vector<size_t> streamPoint(num_systems);
-    for (int s = 0; s < num_systems; ++s) {
-        auto [lat, lon] = lm.getLatLon(streams[s].id);
-        streamPoint[s] = lat * lon_size + lon;
-    }
-
-    // ─── Adding forcings (first 2 days only) ─────────────────────────────────
-    struct NCForcing {
-        std::string path, var;
-        double      dt;    // hours per time step
-    };
-    std::vector<NCForcing> ncForcings = {
-        {"../data/pr_hourly_era5land_2019.nc",    "pr",  1.0},
-        {"../data/t2m_daily_avg_era5land_2019.nc","t2m", 24.0}
-    };
-    int nForc = int(ncForcings.size());
-
-    std::vector<float>  h_forc_data;
-    std::vector<double> h_forc_dt;
-    std::vector<size_t> h_forc_nT;
-    h_forc_dt .reserve(nForc);
-    h_forc_nT .reserve(nForc);
-    h_forc_data.reserve(nForc * num_systems * 48);
-
-    constexpr double daysToLoad = 2.0;  // grab only first 2 days
-
-    for (auto &fm : ncForcings) {
-        NetCDFLoader loader(fm.path, fm.var);
-        size_t fullTime = loader.getTimeSize();
-
-        // how many steps in 2 days?
-        size_t steps2d = size_t(std::round(daysToLoad * 24.0 / fm.dt));
-        steps2d = std::min(fullTime, steps2d);
-
-        auto raw = loader.loadTimeChunk(0, steps2d);
-
-        h_forc_dt.push_back(fm.dt);
-        h_forc_nT.push_back(steps2d);
-
-        size_t gridPts = loader.getLatSize() * loader.getLonSize();
-        float *basePtr = raw.get();
-
-        for (size_t t = 0; t < steps2d; ++t) {
-            float *slice = basePtr + t * gridPts;
-            for (int s = 0; s < num_systems; ++s) {
-                h_forc_data.push_back(slice[ streamPoint[s] ]);
-            }
-        }
-    }
-
-    // C) Upload to device
-    float* d_forc_ptr = nullptr;
-    cudaMalloc(&d_forc_ptr, sizeof(float) * h_forc_data.size());
-    cudaMemcpy(d_forc_ptr,
-            h_forc_data.data(),
-            sizeof(float) * h_forc_data.size(),
-            cudaMemcpyHostToDevice);
-
-    // D) Push dt, nT, pointer and count into device symbols
-    {
-        // copy forcing time‐step sizes (hours)
-        cudaMemcpyToSymbol(c_forc_dt, h_forc_dt.data(),
-                        sizeof(double) * nForc);
-        // copy number of samples per forcing
-        cudaMemcpyToSymbol(c_forc_nT, h_forc_nT.data(),
-                        sizeof(size_t) * nForc);
-
-        // copy pointer to big forcing array
-        cudaMemcpyToSymbol(d_forc_data, &d_forc_ptr,
-                        sizeof(d_forc_ptr));
-        // copy the count
-        cudaMemcpyToSymbol(nForc,       &nForc,
-                        sizeof(nForc));
-    }
-
-    // ────────── End uploading forcings ──────────
-
-    // ────────── Debugging forcings ──────────
-    // Uncomment the following lines to debug forcings
-    // cudaError_t err2 = cudaMemcpyToSymbol(d_forc_data, &d_forc_ptr, sizeof(d_forc_ptr));
-    // printf("copy-to-symbol(forcing ptr) → %s\n", cudaGetErrorString(err2));
-
-    // debugForcings<<<1,4>>>(d_forc_ptr, h_forc_data.size(), num_systems);
-    // cudaDeviceSynchronize();
-
-    // // check first time‐step of both forcings for the first few streams:
-    // debugForcings2<<<1,4>>>(d_forc_ptr, num_systems);
-    // cudaDeviceSynchronize();
-
-    // debugForcingsMulti<<<1,4>>>(d_forc_ptr, num_systems);
-    // cudaDeviceSynchronize();
-
-    // // debug minute‐by‐minute stepping of pr (j=0) and t2m (j=1)
-    // debugMinuteForcings<<<1,4>>>(d_forc_ptr, num_systems);
-    // cudaDeviceSynchronize();
-
-    // // debug first 3 hours holding behavior for sys=0
-    // debugHolding<<<1,1>>>(d_forc_ptr, num_systems);
-    // cudaDeviceSynchronize();
-
-    // // debug the holding behavior for pr (hourly) and t2m (daily)
-    // debugHolding<<<1, 1>>>(d_forc_ptr, num_systems);
-    // cudaDeviceSynchronize();
-
-    
-    // ─────────End forcing─────────
-
-
-    // ───────── Define time span (first‐2‐day test) ─────────
-    const double t0 = 0.0;
-    const double tf = 2 * 24.0 * 60.0;  // 2 days in minutes
-    
-
-    // ───────── Compute SciPy‐style initial step and upload devParams ─────────
-    {
-        int N_EQ = Model204::N_EQ;
-        const SpatialParams* host_sp_ptr = spatialParams.data();
-        std::vector<double> y0_cpu(N_EQ, 0.0), f0_cpu(N_EQ), scale(N_EQ);
-        Model204::rhs(t0, y0_cpu.data(), f0_cpu.data(), N_EQ, 0, host_sp_ptr, h_forc_data.data(), nForc);
-
-        double rtol = 1e-6, atol = 1e-9;
-        for (int i = 0; i < N_EQ; ++i)
-            scale[i] = atol + rtol * std::fabs(y0_cpu[i]);
-        double d0 = 0, d1 = 0;
-        for (int i = 0; i < N_EQ; ++i) {
-            d0 += std::pow(y0_cpu[i]/scale[i],2);
-            d1 += std::pow(f0_cpu[i]/scale[i],2);
-        }
-        d0 = std::sqrt(d0);
-        d1 = std::sqrt(d1);
-        double h_guess = std::max(1e-6, 0.01 * d0 / (d1 + 1e-16));
-
-        Model204::Parameters hp;
-        hp.initialStep = h_guess;
-        hp.rtol        = rtol;
-        hp.atol        = atol;
-        hp.safety      = 0.9;
-        hp.minScale    = 0.2;
-        hp.maxScale    = 10.0;
-        setModelParameters<Model204>(hp);
-    }
-
-    // ───────── Flatten initial y ─────────
-    std::vector<double> h_y0(num_systems * Model204::N_EQ);//use this
-    for (int s = 0; s < num_systems; ++s) {
-        for (int i = 0; i < Model204::N_EQ; ++i) {
-            h_y0[s * Model204::N_EQ + i] = streams[s].y0[i];
-        }
-    }
-  
-
-    // ───────── Define query times (first 2 days, hourly) ─────────
-    std::vector<double> h_query_times;
-    for (double t = t0; t <= tf; t += 60.0) {
-        h_query_times.push_back(t);
-    }
-    int num_queries = int(h_query_times.size());
-
-    
-
-    // ───────── Allocate GPU buffers & launch solver ─────────
-    double *d_y0_all, *d_y_final_all, *d_query_times, *d_dense_all;
-    int    *d_stiff;                // NEW: flags buffer
-    int     ns, nq;
-
-    std::tie(d_y0_all,
-            d_y_final_all,
-            d_query_times,
-            d_dense_all,
-            d_stiff,          // ← now unpack 7 items
-            ns,
-            nq)
-        = setup_gpu_buffers<Model204>(h_y0, h_query_times);
-
-
-    // ───────── Diagnostic launch + checks ─────────
-    const int THREADS_PER_BLOCK = 128;
-    int numBlocks = (ns + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    dim3 blocks(numBlocks), threads(THREADS_PER_BLOCK);
-
-    std::printf("Launching kernel with %d blocks, %d threads/block (ns=%d)\n",
-                numBlocks, THREADS_PER_BLOCK, ns);
-
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "Pre-launch cudaGetLastError: %s\n",
-                    cudaGetErrorString(err));
-    }
-
-    // —─────────────────────── launching error kernel
-    cudaMemcpyToSymbol(d_forc_data, &d_forc_ptr, sizeof(d_forc_ptr));
-
-
-    rk45_then_radau_multi<Model204><<<blocks,threads>>>(
-        d_y0_all, d_y_final_all,
-        d_query_times, d_dense_all,
-        ns, nq,
-        t0, tf,
-        d_sp,      // spatial params
-        d_stiff,   // stiffness flags
-        d_forc_ptr,  // forcing data pointer
-        nForc         // number of forcings
-    );
-
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "Kernel launch failed: %s\n",
-                    cudaGetErrorString(err));
-        return 1;
-    } else {
-        std::puts("Kernel launch: OK");
-    }
-
-    err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        std::fprintf(stderr, "Kernel execution failed: %s\n",
-                    cudaGetErrorString(err));
-        return 1;
-    } else {
-        std::puts("Kernel execution: OK");
-    }
-    // ————————————————————————————————
-
-    // ───────── Retrieve results & free buffers ─────────
-
-    // if(rank)
-    auto [h_y_final, h_dense] = retrieve_and_free<Model204>(
-        d_y0_all, d_y_final_all,
-        d_query_times, d_dense_all, d_stiff,
-        ns, nq,
-        t0, tf, d_sp
-    );
-
-    // ───────── Write final.csv ─────────
-    {
-        std::ofstream final_file("final_204_a.csv");
-        final_file << "h_snow";
-        for (int i = 1; i < Model204::N_EQ; ++i) {
-            final_file << ",var" << i;
-        }
-        final_file << "\n";
-        for (int s = 0; s < num_systems; ++s) {
-            for (int i = 0; i < Model204::N_EQ; ++i) {
-                final_file << h_y_final[s * Model204::N_EQ + i];
-                if (i + 1 < Model204::N_EQ) final_file << ",";
-            }
-            final_file << "\n";
-        }
-    }
-
-    // ───────── Write dense.csv ─────────
-    {
-        std::ofstream dense_file("dense_204_a.csv");
-        dense_file << "time";
-        for (int s = 0; s < num_systems; ++s) {
-            for (int i = 0; i < Model204::N_EQ; ++i) {
-                dense_file << ",var" << i << "_sys" << s;
-            }
-        }
-        dense_file << "\n";
-        for (int q = 0; q < num_queries; ++q) {
-            dense_file << std::fixed << std::setprecision(8)
-                    << h_query_times[q];
-            for (int s = 0; s < num_systems; ++s) {
-                for (int i = 0; i < Model204::N_EQ; ++i) {
-                    int idx = (s * num_queries + q) * Model204::N_EQ + i;
-                    dense_file << "," << std::setprecision(9)
-                            << h_dense[idx];
-                }
-            }
-            dense_file << "\n";
-        }
-    }
-
-    // ───────── Print a quick summary ─────────
-    std::printf("Final states at t = %.1f:\n", tf);
-    for (int s = 0; s < num_systems; ++s) {
-        std::printf(" System %d:", s);
-        for (int i = 0; i < Model204::N_EQ; ++i) {
-            std::printf(" y%d=%.6f", i, h_y_final[s * Model204::N_EQ + i]);
+        // Print UUID in standard format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        std::printf("GPU UUID: ");
+        for (int i = 0; i < 16; ++i) {
+            std::printf("%02x", (unsigned char)prop.uuid.bytes[i]);
+            if (i == 3 || i == 5 || i == 7 || i == 9)
+                std::printf("-");
         }
         std::printf("\n");
+        // _____________ end checking GPU properties _______________
+
+        // ───────── Test that even a trivial kernel will launch ─────────
+        testKernel<<<1,1>>>();
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            std::fprintf(stderr, "testKernel launch failed: %s\n",
+                        cudaGetErrorString(err));
+        } else {
+            std::puts("testKernel launch: OK");
+        }
+        cudaDeviceSynchronize();
+
+
+
+        using namespace rk45_api;
+
+        // ───────── 0) load per‐stream spatial parameters ─────────
+        // auto spatialParams = loadSpatialParams("../data/small_test.csv");//10 links
+
+        int count;
+
+        // Receive the count first
+        MPI_Recv(&count, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+        // Allocate buffer
+        std::vector<SpatialParams> receivedSubset(count);
+
+        // Receive the actual data
+        MPI_Recv(receivedSubset.data(), count * sizeof(SpatialParams), MPI_BYTE, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+        auto spatialParams = receivedSubset;
+        
+        // Query one of the NetCDF files for its spatial dimensions
+        NetCDFLoader prLoader("../data/pr_hourly_era5land_2019.nc", "pr");
+        size_t lat_size = prLoader.getLatSize();
+        size_t lon_size = prLoader.getLonSize();
+
+        // build a vector of Stream<Model204>, using a common y0
+        std::array<double, Model204::N_EQ> y0_common = {0.01, 3.0, 0.0, 5.0, 0.2};
+        std::vector< Stream<Model204> > streams;
+        streams.reserve(spatialParams.size());
+        for (auto const &sp : spatialParams) {
+            streams.emplace_back(sp, y0_common);
+        }
+        int num_systems = int(streams.size());
+
+        // ────────── Debug: copy SpatialParams to device and verify ──────────
+        std::vector<SpatialParams> hostSP;
+        hostSP.reserve(num_systems);
+        for (auto const &st : streams) {
+            hostSP.push_back(st.sp);
+        }
+        size_t byteCount = num_systems * sizeof(SpatialParams);
+
+        SpatialParams* d_sp = nullptr;
+        //cudaError_t err = cudaMalloc(&d_sp, byteCount);
+        err = cudaMalloc(&d_sp, byteCount);
+        if (err != cudaSuccess) {
+            std::fprintf(stderr, "cudaMalloc(d_sp) failed: %s\n", cudaGetErrorString(err));
+            return 1;
+        }
+
+        err = cudaMemcpy(d_sp, hostSP.data(), byteCount, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            std::fprintf(stderr, "cudaMemcpy(d_sp) failed: %s\n", cudaGetErrorString(err));
+            return 1;
+        }
+
+        // Host‐side round‐trip check (first element)
+        SpatialParams check0;
+        err = cudaMemcpy(&check0, d_sp, sizeof(SpatialParams), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            std::fprintf(stderr, "cudaMemcpy back failed: %s\n", cudaGetErrorString(err));
+        } else {
+            std::printf("HOST→DEVICE round-trip: stream=%ld, Hu=%g, infil=%g, perco=%g\n",
+                        check0.stream, check0.Hu, check0.infil, check0.perco);
+        }
+
+        // ─── Debugging full host→device→host compare ───────────────────────────
+        {
+            std::vector<SpatialParams> hostCheck(num_systems);
+            err = cudaMemcpy(hostCheck.data(), d_sp, byteCount, cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess) {
+                std::fprintf(stderr, "Full round-trip cudaMemcpy back failed: %s\n", cudaGetErrorString(err));
+            } else {
+                for (int i = 0; i < num_systems; ++i) {
+                    const auto &in  = hostSP[i];
+                    const auto &out = hostCheck[i];
+                    if (in.stream != out.stream ||
+                        fabs(in.Hu - out.Hu)       > 1e-12 ||
+                        fabs(in.infil - out.infil) > 1e-12 ||
+                        fabs(in.perco - out.perco) > 1e-12
+                        /* add more fields if desired */
+                    ) {
+                        std::fprintf(stderr,
+                            "Mismatch at idx %d: CSV(stream=%ld,Hu=%g,...) vs GPU(stream=%ld,Hu=%g,...)\n",
+                            i,
+                            in.stream, in.Hu,
+                            out.stream, out.Hu
+                        );
+                    }
+                }
+            }
+        }
+
+        // ──── ended debugging ──────────────────────────────────────────────────────
+
+        // Populate the device‐constant pointer so kernels see it
+        err = cudaMemcpyToSymbol(devSpatialParamsPtr, &d_sp, sizeof(d_sp));
+        if (err != cudaSuccess) {
+            std::fprintf(stderr, "cudaMemcpyToSymbol(devSpatialParamsPtr) failed: %s\n",
+                        cudaGetErrorString(err));
+            return 1;
+        }
+
+        // ─────── DebugRHS: verify Model204::rhs uses the right parameters ───────
+        {
+            int target_sys = 0;                // choose the stream index to inspect
+            debugRHS<<<1,1>>>(d_sp, target_sys);
+            cudaDeviceSynchronize();
+        }
+
+        // // ────Debugging: launch debugAllParams to print every stream ─────────
+        // {
+        //     int dbgThreads = 32;
+        //     int dbgBlocks  = (num_systems + dbgThreads - 1) / dbgThreads;
+        //     debugAllParams<<<dbgBlocks, dbgThreads>>>(d_sp, num_systems);
+        //     err = cudaDeviceSynchronize();
+        //     if (err != cudaSuccess) {
+        //         std::fprintf(stderr, "debugAllParams kernel failed: %s\n", cudaGetErrorString(err));
+        //     } else {
+        //         std::puts("debugAllParams kernel ran successfully");
+        //     }
+        // }
+        // ───────── ended debugging ────────────────────────────────────────────────────────
+
+        // Verify via checkDevParamsKernel204
+        checkDevParamsKernel204<<<1,1>>>();
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            std::fprintf(stderr, "checkDevParamsKernel204 failed: %s\n",
+                        cudaGetErrorString(err));
+            return 1;
+        }
+
+        // Launch the tiny debugParams kernel
+        debugParams<<<1,32>>>(d_sp);
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            std::fprintf(stderr, "debugParams kernel failed: %s\n", cudaGetErrorString(err));
+        } else {
+            std::puts("debugParams kernel ran successfully!!!");
+        }
+        // ───────── end debugging spatial params ────────────────────────────────────
+
+
+        // ─── Build streamPoint lookup ─────────────────────────────────────────
+        LookupMapper lm("../data/small_example_pr_lookup.csv");
+        if (!lm.load()) {
+            std::cerr << "Lookup load failed\n";
+            return 1;
+        }
+        // one flat index per system
+        std::vector<size_t> streamPoint(num_systems);
+        for (int s = 0; s < num_systems; ++s) {
+            auto [lat, lon] = lm.getLatLon(streams[s].id);
+            streamPoint[s] = lat * lon_size + lon;
+        }
+
+        // ─── Adding forcings (first 2 days only) ─────────────────────────────────
+        struct NCForcing {
+            std::string path, var;
+            double      dt;    // hours per time step
+        };
+        std::vector<NCForcing> ncForcings = {
+            {"../data/pr_hourly_era5land_2019.nc",    "pr",  1.0},
+            {"../data/t2m_daily_avg_era5land_2019.nc","t2m", 24.0}
+        };
+        int nForc = int(ncForcings.size());
+
+        std::vector<float>  h_forc_data;
+        std::vector<double> h_forc_dt;
+        std::vector<size_t> h_forc_nT;
+        h_forc_dt .reserve(nForc);
+        h_forc_nT .reserve(nForc);
+        h_forc_data.reserve(nForc * num_systems * 48);
+
+        constexpr double daysToLoad = 2.0;  // grab only first 2 days
+
+        for (auto &fm : ncForcings) {
+            NetCDFLoader loader(fm.path, fm.var);
+            size_t fullTime = loader.getTimeSize();
+
+            // how many steps in 2 days?
+            size_t steps2d = size_t(std::round(daysToLoad * 24.0 / fm.dt));
+            steps2d = std::min(fullTime, steps2d);
+
+            auto raw = loader.loadTimeChunk(0, steps2d);
+
+            h_forc_dt.push_back(fm.dt);
+            h_forc_nT.push_back(steps2d);
+
+            size_t gridPts = loader.getLatSize() * loader.getLonSize();
+            float *basePtr = raw.get();
+
+            for (size_t t = 0; t < steps2d; ++t) {
+                float *slice = basePtr + t * gridPts;
+                for (int s = 0; s < num_systems; ++s) {
+                    h_forc_data.push_back(slice[ streamPoint[s] ]);
+                }
+            }
+        }
+        
+        // C) Upload to device
+        float* d_forc_ptr = nullptr;
+        cudaMalloc(&d_forc_ptr, sizeof(float) * h_forc_data.size());
+        cudaMemcpy(d_forc_ptr,
+                h_forc_data.data(),
+                sizeof(float) * h_forc_data.size(),
+                cudaMemcpyHostToDevice);
+
+        // D) Push dt, nT, pointer and count into device symbols
+        {
+            // copy forcing time‐step sizes (hours)
+            cudaMemcpyToSymbol(c_forc_dt, h_forc_dt.data(),
+                            sizeof(double) * nForc);
+            // copy number of samples per forcing
+            cudaMemcpyToSymbol(c_forc_nT, h_forc_nT.data(),
+                            sizeof(size_t) * nForc);
+
+            // copy pointer to big forcing array
+            cudaMemcpyToSymbol(d_forc_data, &d_forc_ptr,
+                            sizeof(d_forc_ptr));
+            // copy the count
+            cudaMemcpyToSymbol(nForc,       &nForc,
+                            sizeof(nForc));
+        }
+
+        // ────────── End uploading forcings ──────────
+
+        // ────────── Debugging forcings ──────────
+        // Uncomment the following lines to debug forcings
+        // cudaError_t err2 = cudaMemcpyToSymbol(d_forc_data, &d_forc_ptr, sizeof(d_forc_ptr));
+        // printf("copy-to-symbol(forcing ptr) → %s\n", cudaGetErrorString(err2));
+
+        // debugForcings<<<1,4>>>(d_forc_ptr, h_forc_data.size(), num_systems);
+        // cudaDeviceSynchronize();
+
+        // // check first time‐step of both forcings for the first few streams:
+        // debugForcings2<<<1,4>>>(d_forc_ptr, num_systems);
+        // cudaDeviceSynchronize();
+
+        // debugForcingsMulti<<<1,4>>>(d_forc_ptr, num_systems);
+        // cudaDeviceSynchronize();
+
+        // // debug minute‐by‐minute stepping of pr (j=0) and t2m (j=1)
+        // debugMinuteForcings<<<1,4>>>(d_forc_ptr, num_systems);
+        // cudaDeviceSynchronize();
+
+        // // debug first 3 hours holding behavior for sys=0
+        // debugHolding<<<1,1>>>(d_forc_ptr, num_systems);
+        // cudaDeviceSynchronize();
+
+        // // debug the holding behavior for pr (hourly) and t2m (daily)
+        // debugHolding<<<1, 1>>>(d_forc_ptr, num_systems);
+        // cudaDeviceSynchronize();
+
+        
+        // ─────────End forcing─────────
+
+
+        // ───────── Define time span (first‐2‐day test) ─────────
+        const double t0 = 0.0;
+        const double tf = 2 * 24.0 * 60.0;  // 2 days in minutes
+        
+
+        // ───────── Compute SciPy‐style initial step and upload devParams ─────────
+        {
+            int N_EQ = Model204::N_EQ;
+            const SpatialParams* host_sp_ptr = spatialParams.data();
+            std::vector<double> y0_cpu(N_EQ, 0.0), f0_cpu(N_EQ), scale(N_EQ);
+            Model204::rhs(t0, y0_cpu.data(), f0_cpu.data(), N_EQ, 0, host_sp_ptr, h_forc_data.data(), nForc);
+
+            double rtol = 1e-6, atol = 1e-9;
+            for (int i = 0; i < N_EQ; ++i)
+                scale[i] = atol + rtol * std::fabs(y0_cpu[i]);
+            double d0 = 0, d1 = 0;
+            for (int i = 0; i < N_EQ; ++i) {
+                d0 += std::pow(y0_cpu[i]/scale[i],2);
+                d1 += std::pow(f0_cpu[i]/scale[i],2);
+            }
+            d0 = std::sqrt(d0);
+            d1 = std::sqrt(d1);
+            double h_guess = std::max(1e-6, 0.01 * d0 / (d1 + 1e-16));
+
+            Model204::Parameters hp;
+            hp.initialStep = h_guess;
+            hp.rtol        = rtol;
+            hp.atol        = atol;
+            hp.safety      = 0.9;
+            hp.minScale    = 0.2;
+            hp.maxScale    = 10.0;
+            setModelParameters<Model204>(hp);
+        }
+
+        // ───────── Flatten initial y ─────────
+        std::vector<double> h_y0(num_systems * Model204::N_EQ);//use this
+        for (int s = 0; s < num_systems; ++s) {
+            for (int i = 0; i < Model204::N_EQ; ++i) {
+                h_y0[s * Model204::N_EQ + i] = streams[s].y0[i];
+            }
+        }
+    
+
+        // ───────── Define query times (first 2 days, hourly) ─────────
+        std::vector<double> h_query_times;
+        for (double t = t0; t <= tf; t += 60.0) {
+            h_query_times.push_back(t);
+        }
+        int num_queries = int(h_query_times.size());
+
+        
+
+        // ───────── Allocate GPU buffers & launch solver ─────────
+        double *d_y0_all, *d_y_final_all, *d_query_times, *d_dense_all;
+        int    *d_stiff;                // NEW: flags buffer
+        int     ns, nq;
+
+        std::tie(d_y0_all,
+                d_y_final_all,
+                d_query_times,
+                d_dense_all,
+                d_stiff,          // ← now unpack 7 items
+                ns,
+                nq)
+            = setup_gpu_buffers<Model204>(h_y0, h_query_times);
+
+
+        // ───────── Diagnostic launch + checks ─────────
+        const int THREADS_PER_BLOCK = 128;
+        int numBlocks = (ns + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        dim3 blocks(1,numBlocks,numBlocks), threads(1,4,4);
+
+        std::printf("Launching kernel with %d blocks, %d threads/block (ns=%d)\n",
+                    numBlocks, THREADS_PER_BLOCK, ns);
+
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            std::fprintf(stderr, "Pre-launch cudaGetLastError: %s\n",
+                        cudaGetErrorString(err));
+        }
+
+        // —─────────────────────── launching error kernel
+        cudaMemcpyToSymbol(d_forc_data, &d_forc_ptr, sizeof(d_forc_ptr));
+
+
+        rk45_then_radau_multi<Model204><<<blocks,threads>>>(
+            d_y0_all, d_y_final_all,
+            d_query_times, d_dense_all,
+            ns, nq,
+            t0, tf,
+            d_sp,      // spatial params
+            d_stiff,   // stiffness flags
+            d_forc_ptr,  // forcing data pointer
+            nForc         // number of forcings
+        );
+
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            std::fprintf(stderr, "Kernel launch failed: %s\n",
+                        cudaGetErrorString(err));
+            return 1;
+        } else {
+            std::puts("Kernel launch: OK");
+        }
+
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            std::fprintf(stderr, "Kernel execution failed: %s\n",
+                        cudaGetErrorString(err));
+            return 1;
+        } else {
+            std::puts("Kernel execution: OK");
+        }
+        // ————————————————————————————————
+
+        // ───────── Retrieve results & free buffers ─────────
+
+        // if(rank)
+        auto [h_y_final, h_dense] = retrieve_and_free<Model204>(
+            d_y0_all, d_y_final_all,
+            d_query_times, d_dense_all, d_stiff,
+            ns, nq,
+            t0, tf, d_sp
+        );
+
+        // // ───────── Write final.csv ─────────
+        // {
+        //     std::ofstream final_file("final_204_a.csv");
+        //     final_file << "h_snow";
+        //     for (int i = 1; i < Model204::N_EQ; ++i) {
+        //         final_file << ",var" << i;
+        //     }
+        //     final_file << "\n";
+        //     for (int s = 0; s < num_systems; ++s) {
+        //         for (int i = 0; i < Model204::N_EQ; ++i) {
+        //             final_file << h_y_final[s * Model204::N_EQ + i];
+        //             if (i + 1 < Model204::N_EQ) final_file << ",";
+        //         }
+        //         final_file << "\n";
+        //     }
+        // }
+
+        // // ───────── Write dense.csv ─────────
+        // {
+        //     std::ofstream dense_file("dense_204_a.csv");
+        //     dense_file << "time";
+        //     for (int s = 0; s < num_systems; ++s) {
+        //         for (int i = 0; i < Model204::N_EQ; ++i) {
+        //             dense_file << ",var" << i << "_sys" << s;
+        //         }
+        //     }
+        //     dense_file << "\n";
+        //     for (int q = 0; q < num_queries; ++q) {
+        //         dense_file << std::fixed << std::setprecision(8)
+        //                 << h_query_times[q];
+        //         for (int s = 0; s < num_systems; ++s) {
+        //             for (int i = 0; i < Model204::N_EQ; ++i) {
+        //                 int idx = (s * num_queries + q) * Model204::N_EQ + i;
+        //                 dense_file << "," << std::setprecision(9)
+        //                         << h_dense[idx];
+        //             }
+        //         }
+        //         dense_file << "\n";
+        //     }
+        // }
+
+        // // ───────── Print a quick summary ─────────
+        // std::printf("Final states at t = %.1f:\n", tf);
+        // for (int s = 0; s < num_systems; ++s) {
+        //     std::printf(" System %d:", s);
+        //     for (int i = 0; i < Model204::N_EQ; ++i) {
+        //         std::printf(" y%d=%.6f", i, h_y_final[s * Model204::N_EQ + i]);
+        //     }
+        //     std::printf("\n");
+        // }
+
+        // ———————————————————————————————— 
+        // ───────── Write to netcdf  ─────────
+
+        // !!!! NEED TO CHANGE TO ACCESS ACTUAL ID AND STATE INDEXES !!!.    
+        int N_EQ = Model204::N_EQ;
+        std::vector<int> linkid_vals(num_systems);
+        std::vector<int> state_vals(N_EQ);
+        for (int s = 0; s < num_systems; ++s) linkid_vals[s] = s;
+        for (int v = 0; v < N_EQ; ++v) state_vals[v] = v;
+
+        //Netcdf file attributes (will be defined in yaml)
+        std::string dense_filename = "/scratch/gpfs/am2192/dense_example_rank_"+ std::to_string(rank)+".nc";
+        std::string final_filename = "/scratch/gpfs/am2192/final_example_rank_"+ std::to_string(rank)+".nc";
+        int compression_level = 0;
+
+        // Write only the final time step (2D output)
+        write_final_netcdf(final_filename,
+                        h_y_final.data(),
+                        linkid_vals.data(),
+                        state_vals.data(),
+                        num_systems,
+                        N_EQ,
+                        compression_level);
+
+        auto start = std::chrono::high_resolution_clock::now();
+        write_dense_netcdf(dense_filename,
+                        h_dense.data(),
+                        h_query_times.data(),
+                        linkid_vals.data(),
+                        state_vals.data(),
+                        num_queries,
+                        num_systems,
+                        N_EQ,
+                        compression_level);
+        std::cout << "Write out finished" << std::endl;
+
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = end - start;
+        std::cout << "write_dense_netcdf took " << elapsed.count() << " seconds.\n";
     }
 
-    // ———————————————————————————————— 
-    // ───────── Write to netcdf  ─────────
-
-    // !!!! NEED TO CHANGE TO ACCESS ACTUAL ID AND STATE INDEXES !!!.    
-    int N_EQ = Model204::N_EQ;
-    std::vector<int> linkid_vals(num_systems);
-    std::vector<int> state_vals(N_EQ);
-    for (int s = 0; s < num_systems; ++s) linkid_vals[s] = s;
-    for (int v = 0; v < N_EQ; ++v) state_vals[v] = v;
-
-    //Netcdf file attributes (will be defined in yaml)
-    std::string dense_filename = "/scratch/gpfs/am2192/dense_example.nc";
-    std::string final_filename = "/scratch/gpfs/am2192/final_example.nc";
-    int compression_level = 0;
-
-    // Write only the final time step (2D output)
-    write_final_netcdf(final_filename,
-                    h_y_final.data(),
-                    linkid_vals.data(),
-                    state_vals.data(),
-                    num_systems,
-                    N_EQ,
-                    compression_level);
-
-    auto start = std::chrono::high_resolution_clock::now();
-    write_dense_netcdf(dense_filename,
-                    h_dense.data(),
-                    h_query_times.data(),
-                    linkid_vals.data(),
-                    state_vals.data(),
-                    num_queries,
-                    num_systems,
-                    N_EQ,
-                    compression_level);
-    std::cout << "Write out finished" << std::endl;
-
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end - start;
-    std::cout << "write_dense_netcdf took " << elapsed.count() << " seconds.\n";
-
+    MPI_Finalize();
     return 0;
 }
