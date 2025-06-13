@@ -128,13 +128,16 @@ $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4) Compile ETmethods.cpp & soiltemp.cpp (disabled)
+# SRC_UTIL_CPP := $(MODELS_DIR)/ETmethods.cpp $(MODELS_DIR)/soiltemp.cpp
 # /*
+$(OBJ_DIR)/ETmethods.o: $(MODELS_DIR)/ETmethods.cpp | $(OBJ_DIR) \
+    $(Q)$(NVCC) $(NVCCFLAGS) -x cu -dc -c $< -o $@
+$(OBJ_DIR)/soiltemp.o: $(MODELS_DIR)/soiltemp.cpp | $(OBJ_DIR) \
+    $(Q)$(NVCC) $(HOSTFLAGS) -x cu -dc -c $< -o $@
 # $(OBJ_DIR)/ETmethods.o: $(MODELS_DIR)/ETmethods.cpp | $(OBJ_DIR)
-# 	$(Q)$(NVCC) $(HOSTFLAGS) -dc -c $< -o $@
-
+#   $(Q)$(NVCC) $(HOSTFLAGS) -dc -c $< -o $@
 # $(OBJ_DIR)/soiltemp.o: $(MODELS_DIR)/soiltemp.cpp | $(OBJ_DIR)
-# 	$(Q)$(NVCC) $(HOSTFLAGS) -dc -c $< -o $@
-# */
+#   $(Q)$(NVCC) $(HOSTFLAGS) -dc -c $< -o $@
 # ─────────────────────────────────────────────────────────────────────────────
 # 5) Compile .cu solver files to relocatable objects
 # ─────────────────────────────────────────────────────────────────────────────
