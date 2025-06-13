@@ -118,3 +118,15 @@ cudaMemcpyToSymbol(NewModel::devParams, &hostParams, sizeof(hostParams));
 ```
 
 so the GPU uses those tolerances instead of hard-coded values.
+
+
+# 6. Splitting data
+In the main.cpp rank 0 is used to split the parameters by the number of gpus (right now just the number of ranks minus one). 
+
+
+**della-gh**
+command line: mpirun -np 2 ./rk45_solver (for now only one gpu)
+
+for nsight info: mpirun -np 2 nsys profile --trace=cuda,mpi --stats=true --output=rk45_profile_%q{OMPI_COMM_WORLD_RANK} rk45_solver
+
+
