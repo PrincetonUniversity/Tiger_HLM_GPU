@@ -9,6 +9,17 @@
 #include <utility>  // for std::pair
 #include <vector>
 
+// Structure to hold spatial chunk information
+// Current logic is simple: divide the lat/lon grid into rectangular chunks based on # of processes (ranks)
+struct SpatialChunk {
+    size_t startLat, numLat;    // Start index and number of latitudes in the chunk
+    size_t startLon, numLon;    
+    
+    // Constructor for convenience
+    SpatialChunk(size_t sLat = 0, size_t nLat = 0, size_t sLon = 0, size_t nLon = 0)
+        : startLat(sLat), numLat(nLat), startLon(sLon), numLon(nLon) {}
+};
+
 
 class LookupMapper {
 public:
@@ -59,9 +70,11 @@ public:
  
     // Load data by time chunk into memory
     std::unique_ptr<float[]> loadTimeChunk(size_t startTime, size_t numTimeSteps);
- 
-    // Check if data is loaded correctly
-    bool isDataLoaded() const;
+
+    // Load data by any chunk: time/lat/lon into memory
+    std::unique_ptr<float[]> loadChunk(size_t startTime, size_t numTime,    // start index of time dimension, number of time steps in loading chunk
+                                       size_t startLat, size_t numLat,
+                                       size_t startLon, size_t numLon);
  
     // Getters
     size_t getTimeSize() const { return timeSize; }
@@ -83,7 +96,10 @@ public:
     
     // Return NetCDF file and variable IDs for advanced operations: maybe needed in the future
     int getFileId() const { return ncid; }
-    int getVariableId() const { return varid; }
+    int getVariableId() const { return varid; }  
+    
+    // Calculate chunks for this NetCDF file
+    std::vector<SpatialChunk> calculateSpatialChunks(size_t latSize, size_t lonSize, int numChunks);
 };
 
 

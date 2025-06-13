@@ -194,6 +194,43 @@ std::unique_ptr<float[]> NetCDFLoader::loadTimeChunk(size_t startTime, size_t nu
     
     return data;
 }
+
+// Load data by any chunk: time/lat/lon into memory
+std::unique_ptr<float[]> NetCDFLoader::loadChunk(size_t startTime, size_t numTime, 
+                                                  size_t startLat, size_t numLat, 
+                                                  size_t startLon, size_t numLon) {
+    // Check if chunk is out of bounds
+    if (numTime == 0 || numLat == 0 || numLon == 0) {
+        throw std::invalid_argument("Size of chunk dimensions must be greater than zero");
+    }
+    if (startTime >= timeSize || startLat >= latSize || startLon >= lonSize) {
+        throw std::out_of_range("Start indices out of range");
+    }
+    if (startTime + numTime > timeSize || startLat + numLat > latSize || startLon + numLon > lonSize) {
+        throw std::out_of_range("Requested chunk exceeds available data");
+    }
+    
+    // Calculate total elements in the chunk
+    size_t totalElements = numTime * numLat * numLon;
+    
+    // Allocate memory for the chunk
+    std::unique_ptr<float[]> data = std::make_unique<float[]>(totalElements);
+    
+    // Define start and count arrays for subsetting
+    size_t start[3] = {startTime, startLat, startLon};
+    size_t count[3] = {numTime, numLat, numLon};
+    
+    // Read data from NetCDF file using C API
+    int status = nc_get_vara_float(ncid, varid, start, count, data.get());
+    checkError(status, "Reading variable data");
+    
+    std::cout << "Loaded chunk for " << varName << ": time steps " << startTime << " to "
+              << (startTime + numTime - 1) << ", lat " << startLat << " to "
+              << (startLat + numLat - 1) << ", lon " << startLon << " to "
+              << (startLon + numLon - 1) << std::endl;
+    
+    return data;
+}
  
 // Get a single value from pre-loaded chunk data
 float NetCDFLoader::getValueFromChunk(const std::unique_ptr<float[]>& chunkData,
@@ -211,8 +248,43 @@ float NetCDFLoader::getValueFromChunk(const std::unique_ptr<float[]>& chunkData,
     size_t index = relativeTimeIndex * (latSize * lonSize) + latIndex * lonSize + lonIndex;
     return chunkData[index];
 }
- 
-// Check if data is loaded correctly
-bool NetCDFLoader::isDataLoaded() const {
-    return ncid >= 0 && timeSize > 0 && latSize > 0 && lonSize > 0;
+
+
+// Calculate spatial chunks based on latitude and longitude sizes
+std::vector<SpatialChunk> NetCDFLoader::calculateSpatialChunks(size_t latSize, size_t lonSize, int numChunks) {
+    if (numChunks <= 0) {
+        throw std::invalid_argument("Number of chunks must be positive");
+    }
+    if (latSize == 0 || lonSize == 0) {
+        throw std::invalid_argument("Spatial dimensions must be positive");
+    }
+    
+    std::vector<SpatialChunk> chunks(numChunks);
+    
+    // Divide by the smaller dimension for better load balancing
+    if (latSize <= lonSize) {
+        // Divide latitude dimension
+        size_t latChunkSize = latSize / numChunks;
+        size_t remainder = latSize % numChunks;
+        
+        for (int r = 0; r < numChunks; ++r) {
+            chunks[r].startLat = r * latChunkSize + std::min(static_cast<size_t>(r), remainder);
+            chunks[r].numLat = latChunkSize + (r < remainder ? 1 : 0);
+            chunks[r].startLon = 0;
+            chunks[r].numLon = lonSize;  // Full longitude range
+        }
+    } else {
+        // Divide longitude dimension
+        size_t lonChunkSize = lonSize / numChunks;
+        size_t remainder = lonSize % numChunks;
+        
+        for (int r = 0; r < numChunks; ++r) {
+            chunks[r].startLat = 0;
+            chunks[r].numLat = latSize;  // Full latitude range
+            chunks[r].startLon = r * lonChunkSize + std::min(static_cast<size_t>(r), remainder);
+            chunks[r].numLon = lonChunkSize + (r < remainder ? 1 : 0);
+        }
+    }
+    
+    return chunks;
 }
