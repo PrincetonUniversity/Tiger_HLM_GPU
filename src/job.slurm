@@ -16,4 +16,6 @@ module load openmpi/gcc/4.1.6
 module load hdf5/gcc/openmpi-4.1.6/1.14.4
 module load netcdf/gcc/hdf5-1.14.4/openmpi-4.1.6/4.9.2
 
-nsys profile --trace=cuda,nvtx,mpi --output=profile_report srun -n 3 ./rk45_solver 
+# nsys profile --trace=cuda,nvtx,mpi --output=profile_report srun -n 3 ./rk45_solver 
+
+srun -n 3 ncu --target-processes=all ./rk45_solver 
