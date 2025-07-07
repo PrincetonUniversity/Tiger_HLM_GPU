@@ -6,8 +6,9 @@
 namespace ETMethods {
 
 // ───────── HamonPET ─────────
-// Implements Hamon PET estimation.
-// See header for documentation.
+// Implements Hamon PET estimation
+// See header for documentation
+__host__ __device__
 double HamonPET(double temperature,
                 double latitude,
                 double doy)
@@ -42,8 +43,9 @@ double HamonPET(double temperature,
 }
 
 // ───────── ETactual ─────────
-// Implements actual ET estimation.
-// See header for documentation.
+// Implements actual ET estimation
+// See header for documentation
+__host__ __device__
 double ETactual(double Emax,
                 double s,
                 double sw,
