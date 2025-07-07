@@ -2,9 +2,7 @@
 #pragma once
 
 // Forward‐declaration of the implicit Radau IIA multi‐system kernel
-// (parallel to rk45_kernel_multi).
-// Must match the signature in radau_kernel.cu.
-
+// for the Model204 system.
 template <class Model204>
 __global__ void radau_kernel_multi(
     double* y0_all,

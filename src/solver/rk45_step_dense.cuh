@@ -218,29 +218,85 @@ __device__ void rk45_dense(
              69997945.0/29380423.0 }
     };
 
-    // Precompute Q[m][i] = sum_j Pmat[j][m] * k[j][i], for m=0..3, i=0..N_EQ-1
-    double Q[4][N_EQ];
-    for (int m = 0; m < 4; ++m) {
-        for (int i = 0; i < N_EQ; ++i) {
-            double sum = 0.0;
-            for (int j = 0; j < 7; ++j) {
-                sum += Pmat[j][m] * k[j][i];
-            }
-            Q[m][i] = sum;
-        }
-    }
+    // // Precompute Q[m][i] = sum_j Pmat[j][m] * k[j][i], for m=0..3, i=0..N_EQ-1
+    // double Q[4][N_EQ];
+    // for (int m = 0; m < 4; ++m) {
+    //     for (int i = 0; i < N_EQ; ++i) {
+    //         double sum = 0.0;
+    //         for (int j = 0; j < 7; ++j) {
+    //             sum += Pmat[j][m] * k[j][i];
+    //         }
+    //         Q[m][i] = sum;
+    //     }
+    // }
 
+    // // Evaluate the quartic interpolation polynomial at theta:
+    // // y_dense[i] = y_n[i] + h * [ Q[0][i]*θ + Q[1][i]*θ² + Q[2][i]*θ³ + Q[3][i]*θ⁴ ]
+    // for (int i = 0; i < N_EQ; ++i) {
+    //     double poly = 0.0;
+    //     double thp = theta; // θ^1
+    //     for (int m = 0; m < 4; ++m) {
+    //         poly += Q[m][i] * thp;
+    //         thp *= theta;   // θ^(m+2)
+    //     }
+    //     y_dense[i] = y_n[i] + h * poly;
+    // }
+
+    // NEW code
     // Evaluate the quartic interpolation polynomial at theta:
     // y_dense[i] = y_n[i] + h * [ Q[0][i]*θ + Q[1][i]*θ² + Q[2][i]*θ³ + Q[3][i]*θ⁴ ]
+    // for (int i = 0; i < N_EQ; ++i) {
+    //     double poly = 0.0;
+    //     // for each stage j accumulate its contribution:
+    //     for (int j = 0; j < 7; ++j) {
+    //         // compute Σ_{m=0..3} Pmat[j][m] * θ^(m+1)
+    //         double coeff = 0.0;
+    //         double thp   = theta;    // θ^1
+    //         for (int m = 0; m < 4; ++m) {
+    //             coeff += Pmat[j][m] * thp;
+    //             thp   *= theta;        // θ^(m+2) next iteration
+    //         }
+    //         poly += coeff * k[j][i];
+    //     }
+    //     // now form the dense‐output
+    //     y_dense[i] = y_n[i] + h * poly;
+    // }
+
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Compute the quartic dense‐output interpolant without a temporary Q array
+    //
+    // We want:
+    //   y_dense[i] = y_n[i] 
+    //              + h * Σ_{j=0..6} [ (Σ_{m=0..3} Pmat[j][m] * θ^(m+1)) * k[j][i] ]
+    //
+    // This fuses the “build Q then evaluate” into one double loop:
+    //  - Outer loop over i (each equation)
+    //  - Inner loop over j (each RK stage)
+    //     • compute coeff_j = Σ_{m=1..4} Pmat[j][m–1] * θ^m
+    //     • accumulate coeff_j * k[j][i] into poly
+    // ────────────────────────────────────────────────────────────────────────
     for (int i = 0; i < N_EQ; ++i) {
-        double poly = 0.0;
-        double thp = theta; // θ^1
-        for (int m = 0; m < 4; ++m) {
-            poly += Q[m][i] * thp;
-            thp *= theta;   // θ^(m+2)
+        double poly = 0.0;                     // will hold Σ_j coeff_j * k[j][i]
+        // ── Loop over each stage slope ──────────────────────────────────────
+        for (int j = 0; j < 7; ++j) {
+            // Compute the stage‐j interpolation coefficient:
+            //   coeff_j = Σ_{m=1..4} Pmat[j][m–1] * θ^m
+            double coeff = 0.0;
+            double thp   = theta;              // θ^1 for m=1
+            for (int m = 0; m < 4; ++m) {
+                coeff += Pmat[j][m] * thp;     // add Pmat[j][m] * θ^(m+1)
+                thp   *= theta;                // advance to θ^(m+2)
+            }
+            // Multiply by the stage slope and accumulate
+            poly += coeff * k[j][i];
         }
+        // ── Add base state plus quartic correction ──────────────────────────
+        // y_dense[i] = y_n[i] + h * poly
         y_dense[i] = y_n[i] + h * poly;
     }
+
+
 }
 
 

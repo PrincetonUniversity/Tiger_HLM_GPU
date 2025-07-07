@@ -29,9 +29,21 @@ __global__ void rk45_then_radau_multi(
     const float*  d_forc_data,  // ★ new
     int           nForc       // ★ new: number of forcings
 ) {
+
+
     constexpr int N_EQ = Model204::N_EQ;
     int sys = blockIdx.x*blockDim.x + threadIdx.x;
     if (sys >= num_systems) return;
+
+    // only one thread prints
+    // if (blockIdx.x == 0 && threadIdx.x == 0) {
+    //     printf("[RK45] got d_forc_data=%p  nForc=%d\n"
+    //            "       dt[0]=%g, dt[1]=%g  nT[0]=%llu, nT[1]=%llu\n",
+    //            (void*)d_forc_data, nForc,
+    //            c_forc_dt[0], c_forc_dt[1],
+    //            (unsigned long long)c_forc_nT[0],
+    //            (unsigned long long)c_forc_nT[1]);
+    // }
 
     // solver parameters
     double rtol = devParams.rtol;
@@ -88,7 +100,8 @@ __global__ void rk45_then_radau_multi(
 
             // NEW: convert dt from hours to minutes
             double dt_min        = c_forc_dt[j] * 60.0;
-            double sampleIdxReal = t / dt_min;
+            // double sampleIdxReal = t / dt_min; // changed to t - t0 so that we can loop over the whole time range for a specific time chunk
+            double sampleIdxReal = ( t - t0 ) / dt_min;
 
             size_t nSamples = c_forc_nT[j];
             size_t sampleIdx = (sampleIdxReal < 0.0
@@ -108,6 +121,15 @@ __global__ void rk45_then_radau_multi(
             //size_t base = size_t(j) * (nSamples * num_systems);
             //Fval_arr[j] = d_forc_data[ base + sampleIdx * num_systems + sys ];
         }
+
+        // int sys = blockIdx.x*blockDim.x + threadIdx.x;
+        // if (sys == 0 && threadIdx.x == 0) {
+        //     printf("[KERNEL]  y0_all[0..6] ="
+        //         " %g %g %g %g %g %g %g\n",
+        //         y0_all[0], y0_all[1], y0_all[2],
+        //         y0_all[3], y0_all[4], y0_all[5],
+        //         y0_all[6]);
+        // }
         
 
         // pass forcings into RHS

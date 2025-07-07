@@ -43,6 +43,15 @@ __global__ void radau_kernel_multi(
     if (idx >= n_stiff) return;
     int sys_id = stiff_system_indices[idx];
 
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+    printf("[RADAU] got d_forc_data=%p  nForc=%d\n"
+           "        dt[0]=%g, dt[1]=%g  nT[0]=%llu, nT[1]=%llu\n",
+           (void*)d_forc_data, nForc,
+           c_forc_dt[0], c_forc_dt[1],
+           (unsigned long long)c_forc_nT[0],
+           (unsigned long long)c_forc_nT[1]);
+}
+
     // Load tolerances and initial step from constant memory
     double my_rtol = devParams.rtol;
     double my_atol = devParams.atol;
@@ -99,10 +108,8 @@ __global__ void radau_kernel_multi(
                 if (tq > t) {
                     double theta = (tq - t) / h;
                     double y_dense[N_EQ];
-                    //radau_dense<Model204>(y, /*Z unused here*/ *(double(*)[N_EQ])k_dummy,
-                    //                         N_EQ, h, theta, y_dense);
                     radau_dense<Model204>(y,(double (*)[N_EQ]) k_dummy,N_EQ, h, theta, y_dense);
-                    // store
+                    // store the dense output in the global array
                     for (int comp = 0; comp < N_EQ; ++comp) {
                         int idx = sys_id*(N_EQ*num_queries)
                                 + comp*(num_queries)
@@ -113,7 +120,7 @@ __global__ void radau_kernel_multi(
                 ++next_q_idx;
             }
 
-            // Advance
+            // Advance state to the next step
             for (int i = 0; i < N_EQ; ++i) {
                 y[i] = y_next[i];
             }
@@ -148,6 +155,6 @@ template __global__ void radau_kernel_multi<Model204>(
     const typename Model204::SP_TYPE*, 
     int*,     // stiff_system_indices
     int,       // n_stiff
-    const float*, // d_forc_data      // forcing data
-    int         // nForc               // number of forcings
+    const float*, // forcing data
+    int         // number of forcings
 );
