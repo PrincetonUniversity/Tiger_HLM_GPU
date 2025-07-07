@@ -6,8 +6,9 @@
 namespace SoilTemp {
 
 // ───────── soiltemp ─────────
-// Implements soil temperature change at daily scale.
-// See header for documentation.
+// Implements soil temperature change at daily scale
+// See header for documentation
+__host__ __device__
 double soiltemp(double Tair,
                 double Tz,
                 double Ds)
@@ -18,9 +19,9 @@ double soiltemp(double Tair,
     const double Cice = 8.93e6; // J/m³/°C
     const double fs   = -2.7;   // m⁻¹
     const double Zs   = 3.5e-2; // m (middle of 0–7 cm)
-    const double dt   = 3600.0 * 24.0; // 1 day [s]
+    const double delta_t   = 3600.0 * 24.0; // 1 day [s]
     const double CA   = Cs + Cice;
-    const double f    = dt * Kt / (CA * (2*Zs)*(2*Zs)); // intermediate factor
+    const double f    = delta_t * Kt / (CA * std::pow(2.0 * Zs, 2.0)); // intermediate factor
 
     // Compute new temperature
     double T_star = Tz + f * (Tair - Tz);

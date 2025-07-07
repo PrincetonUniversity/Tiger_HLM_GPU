@@ -76,7 +76,7 @@ __device__ void radau_step(
         1.0/12.0
     };
 
-    // 1) Allocate and initialize stage increments Z[s][i]
+    // Allocate and initialize stage increments Z[s][i]
     double Z[3][N];
     double f0[N];
     Model::rhs(t, y, f0, N, sys_id, d_sp, d_forc_data, nForc);
@@ -84,7 +84,7 @@ __device__ void radau_step(
         for (int i = 0; i < N; ++i)
             Z[s][i] = f0[i];
 
-    // 2) Simplified Newton iteration to solve for Z
+    // Simplified Newton iteration to solve for Z
     const int max_iter = 10;
     double J[N][N], Mmat[3*N][3*N], rhs[3*N];
     for (int iter = 0; iter < max_iter; ++iter) {
@@ -140,7 +140,7 @@ __device__ void radau_step(
         if (maxd < 1e-8) break;
     }
 
-    // 3) Build y_out = y + h Σ b[s] Z[s]
+    // Build y_out = y + h Σ b[s] Z[s]
     for (int i = 0; i < N; ++i) {
         double acc = y[i];
         for (int s = 0; s < 3; ++s) {
@@ -149,7 +149,7 @@ __device__ void radau_step(
         y_out[i] = acc;
     }
 
-    // 4) Error estimate with embedded b_alt
+    // Error estimate with embedded b_alt
     double max_ratio = 0.0;
     for (int i = 0; i < N; ++i) {
         double err_i = 0.0;

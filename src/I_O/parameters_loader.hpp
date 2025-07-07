@@ -24,11 +24,13 @@ struct SpatialParams {
     double perco;
     double Hu;
     double lat;
+    double lon;
     double sw;
     double ss;
     double n_mann;
     double slope;
     double L;
+    double A_i;  
     double A_h;
     double alpha3;
     double alpha4;

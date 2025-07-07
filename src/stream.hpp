@@ -15,20 +15,13 @@
  *   - an initial condition vector @c y0 of length Model::N_EQ (h_snow, h_static,
  *     h_surface, h_grav, h_aquifer).
  *
- * In your main driver you will:
- *   1. call loadSpatialParams(...) to get a std::vector<SpatialParams>,
- *   2. choose a common y0 array (same for every stream),
- *   3. construct std::vector< Stream<Model204> > streams;
- *   4. copy each stream’s y0 into the flattened h_y0 buffer for CUDA,
- *   5. pass the stream-specific parameters to the GPU (e.g. via a constant array
- *      or additional device pointer) before launching rk45.
  *
  * @tparam Model  The ODE model struct (e.g. Model204) defining N_EQ.
  */
 template<class Model>
 struct Stream {
     long id;                     ///< Unique identifier for this stream
-    long next_id;                ///< ID of downstream (next) stream
+    long next_id;                ///< ID of downstream (next) stream 
     
     SpatialParams sp;            ///< Per-stream spatial parameters
                                  ///<   (fields match Model204::rhs’s stubbed inputs)
