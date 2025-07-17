@@ -1,7 +1,6 @@
 # Tiger HLM Runoff (GPU)
 ![Repo Status](https://img.shields.io/badge/status-active-brightgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Last Commit](https://img.shields.io/github/last-commit/USERNAME/REPO/main)
 
 
 
