@@ -1,4 +1,6 @@
 # HLM-GPU
+![Repo Status](https://img.shields.io/badge/status-active-brightgreen)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 ## Directory Structure
 
