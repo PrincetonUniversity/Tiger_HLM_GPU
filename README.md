@@ -125,4 +125,35 @@ command line: mpirun -np 2 ./rk45_solver (for now only one gpu)
 
 for nsight info: mpirun -np 2 nsys profile --trace=cuda,mpi --stats=true --output=rk45_profile_%q{OMPI_COMM_WORLD_RANK} rk45_solver
 
+## Citation
+To cite this software in your publication, please use the following BibTeX (to be updated upon paper acceptance) to refer to the code's [method paper](empty):
+```
+@article{,
+	doi = {},
+	url = {},
+	year = ,
+	month = ,
+	publisher = {},
+	volume = {},
+	number = {},
+	pages = {}
+	author = {},
+	title = {},
+	journal = {},
+}
+```
 
+Finally, we will have DOIs for each released version on Zenodo. This approach promotes computational reproducibility by allowing you to specify the exact version of the code used to generate the results presented in your publication. A working zenodo badge will be added above once the first version is released. 
+
+```
+@software{,
+  author       = {Tiger HLM development team},
+  title        = {},
+  month        = ,
+  year         = ,
+  publisher    = {},
+  version      = {},
+  doi          = {},
+  url          = {}
+}
+```
