@@ -1,7 +1,8 @@
 # Tiger HLM Runoff (GPU)
 ![Repo Status](https://img.shields.io/badge/status-active-brightgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![GitHub forks](https://img.shields.io/github/forks/USERNAME/REPO?style=social)
+![Last Commit](https://img.shields.io/github/last-commit/USERNAME/REPO/main)
+
 
 
 ## Directory Structure
