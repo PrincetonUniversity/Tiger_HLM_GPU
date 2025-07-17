@@ -51,8 +51,8 @@ root/
 
 Load the required CUDA toolkit using the following command:
 
+For della gpu or gh use these as standard
 ```
-#for della gpu or gh use these as standard
 module load cudatoolkit/12.9
 module load openmpi/gcc/4.1.6
 module load hdf5/gcc/openmpi-4.1.6/1.14.4
