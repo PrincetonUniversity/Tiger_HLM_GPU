@@ -125,7 +125,7 @@ command line: mpirun -np 2 ./rk45_solver (for now only one gpu)
 
 for nsight info: mpirun -np 2 nsys profile --trace=cuda,mpi --stats=true --output=rk45_profile_%q{OMPI_COMM_WORLD_RANK} rk45_solver
 
-## Citation
+# Citation
 To cite this software in your publication, please use the following BibTeX (to be updated upon paper acceptance) to refer to the code's [method paper](empty):
 ```
 @article{,
