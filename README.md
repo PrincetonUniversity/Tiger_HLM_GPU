@@ -98,32 +98,7 @@ By default, it uses `DummyModel::UID`, reads `data/forcing.csv` (if present), in
 
 *Note: Steps 4 and 5 are still drafts, it works for dummy model and will be expanded to model 200/204 soon.*
 
-4. **Add a New Model**
 
-* Create `models/model_new.hpp` following the stub in `model_dummy.hpp`.
-* Add its `hostParams` block in `model_registry.cpp`.
-* Add a `launch_rk45_new<<<…>>>` wrapper in `rk45_kernel.cu`.
-* Rebuild with `make`.
-
-5. **Adjust Tolerances or Coefficients**
-   In `main.cpp`, before you call the kernel, set up
-
-```
-NewModel::Parameters hostParams = { absTol_val, relTol_val, /* ... */ };
-cudaMemcpyToSymbol(NewModel::devParams, &hostParams, sizeof(hostParams));
-```
-
-so the GPU uses those tolerances instead of hard-coded values.
-
-
-# 6. Splitting data
-In the main.cpp rank 0 is used to split the parameters by the number of gpus (right now just the number of ranks minus one). 
-
-
-**della-gh**
-command line: mpirun -np 2 ./rk45_solver (for now only one gpu)
-
-for nsight info: mpirun -np 2 nsys profile --trace=cuda,mpi --stats=true --output=rk45_profile_%q{OMPI_COMM_WORLD_RANK} rk45_solver
 
 # Citation
 To cite this software in your publication, please use the following BibTeX (to be updated upon paper acceptance) to refer to the code's [method paper](empty):
