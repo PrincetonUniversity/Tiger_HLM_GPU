@@ -78,7 +78,7 @@ struct Model204
         double h_stat      = fmax(0.0, y[STATE_STATIC]);
         double h_surf      = fmax(0.0, y[STATE_SURFACE]);
         double h_grav      = fmax(0.0, y[STATE_GRAV]);
-        double h_aq        = fmax(0.0, y[STATE_AQUIFER]);
+        double h_aq        = fmax(0.0, y[STATE_AQUIFER]); //update states when reach 0 !!!
 
         // ── 1) unpack previous temperatures ───────────────────────
         double T_air_prev  = y[STATE_TEMP_AIR];
