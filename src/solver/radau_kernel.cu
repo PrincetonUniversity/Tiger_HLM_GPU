@@ -10,6 +10,19 @@
 #include "models/model_204.hpp" // brings in Model204
 #include "I_O/forcing_data.h"
 
+// ---------- DEBUG BOUNDS MACRO ----------
+#ifndef DBG_ASSERT
+#define DBG_ASSERT(cond, msg, ...)                                  \
+    do {                                                            \
+        if (!(cond)) {                                              \
+            printf("[BOUNDS-ERR] " msg "  (block %d, thread %d)\n", \
+                   ##__VA_ARGS__,                                   \
+                   blockIdx.x, threadIdx.x);                        \
+            return; /* kill this thread, prevents UB */             \
+        }                                                           \
+    } while (0)
+#endif
+// ----------------------------------------
 
 
 // -----------------------------------------------------------------------------

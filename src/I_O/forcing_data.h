@@ -9,9 +9,5 @@ extern __constant__ size_t c_forc_nT[MAX_FORCINGS];
 
 // Device symbols declared as extern
 extern __device__ float* d_forc_data;
-extern __device__ int    nForc;
-
-
-
-
-
+// extern __device__ int    nForc;
+extern __constant__ int    nForc;

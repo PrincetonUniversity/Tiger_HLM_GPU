@@ -62,7 +62,7 @@ NVCCFLAGS  += $(MPI_INC) $(MPI_LIB)
 # ─────────────────────────────────────────
 # Source lists
 SRC_MAIN_CU  := main.cpp
-SRC_HOST_CPP := model_registry.cpp
+SRC_HOST_CPP := model_registry.cpp config_loader.cpp
 SRC_IO_CPP   := $(IO_DIR)/parameters_loader.cpp \
                 $(IO_DIR)/forcing_loader.cpp \
                 $(OUT_CPP)

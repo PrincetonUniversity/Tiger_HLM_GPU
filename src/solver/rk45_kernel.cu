@@ -11,6 +11,20 @@
 #include "I_O/forcing_data.h"
 
 
+// ---------- DEBUG BOUNDS MACRO ----------
+#ifndef DBG_ASSERT
+#define DBG_ASSERT(cond, msg, ...)                                  \
+    do {                                                            \
+        if (!(cond)) {                                              \
+            printf("[BOUNDS-ERR] " msg "  (block %d, thread %d)\n", \
+                   ##__VA_ARGS__,                                   \
+                   blockIdx.x, threadIdx.x);                        \
+            return; /* kill this thread, prevents UB */             \
+        }                                                           \
+    } while (0)
+#endif
+// ----------------------------------------
+
 // -----------------------------------------------------------------------------
 // Single‐kernel that does RK45 and flags stiffness, but no in‐kernel Radau.
 // -----------------------------------------------------------------------------
@@ -163,9 +177,18 @@ __global__ void rk45_then_radau_multi(
                 if (tq > t) {
                     double th = (tq - t)/h, yd[N_EQ];
                     rk45_dense<Model204>(y, k45, N_EQ, h, th, yd);
-                    for (int c=0; c<N_EQ; ++c)
+                    for (int c=0; c<N_EQ; ++c){
+                        DBG_ASSERT(sys < num_systems, "Invalid system index sys=%d", sys);
+                        DBG_ASSERT(next_q < num_queries, "Invalid query index next_q=%d", next_q);
+                        DBG_ASSERT(dense_all != nullptr, "dense_all is null!");
+                        int idx = sys * (N_EQ * num_queries) + c * num_queries + next_q;
+                        DBG_ASSERT(idx < (num_systems * N_EQ * num_queries), "OOB index %d", idx);
+
+
                         dense_all[sys*(N_EQ*num_queries) + c*num_queries + next_q] = yd[c];
+                     }
                 }
+
                 ++next_q;
             }
             for (int i=0; i<N_EQ; ++i) y[i] = y_next[i];
