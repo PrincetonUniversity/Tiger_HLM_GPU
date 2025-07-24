@@ -27,6 +27,7 @@
 // __device__ int    nForc_dev;
 
 
+
 // ────────────────────────────────────────────────
 // ────────── Forward‐declare your Radau‐only kernel ──────────
 // Must exactly match the definition in solver/radau_kernel.cu
