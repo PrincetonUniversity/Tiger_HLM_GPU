@@ -11,17 +11,17 @@ Please refer to the [wiki page](https://github.com/PrincetonUniversity/Tiger_HLM
 
 ```text
 root/
-├── data/                       
-│   ├── forcings/               # Forcing data (CSV/NetCDF)
-│   │   ├── precip_forcing.nc   
-│   │   ├── precip_lookup.csv
-│   │   ├── t2m_forcing.nc
-│   │   └── t2m_lookup.csv
-│   ├── parameters.csv          # Spatially varying input parameters
-│   └── config.yaml             # config for input/output paths, model ID,
+├── data/                        # Input data folder             
+│   ├──Stony_Brook/              # Example for Stony Brook basin
+│   ├── precipitation_forcing.nc # Forcing data (NETCDF)
+│   ├── precipitation_lookup.csv # Forcing lookup (CSV)
+│   ├── temperature_forcing.nc   # Forcing data (NETCDF)
+│   ├── temperature_lookup.csv	# Forcing 2 lookup (CSV)
+│   ├── parameters.csv          # Spatially varying input parameters (CSV)
+│   └── config.yaml             # configuration file for input/output paths, model ID, 
 │
-├── scripts/                    # post‐processing or plotting scripts
-│   └── …                       
+├── scripts/                    # pre-processing scripts
+│   └── generate_lookup_tables.ipynb # code to generate lookup tables from forcings NETCDF files and params.csv                 
 │
 └── src/
     ├── Makefile                # Builds everything with nvcc (see below)
@@ -31,12 +31,17 @@ root/
     ├── model_registry.cpp      # Defines the single __constant__ devParams for DummyModel
     │
     ├── I_O/                    # I/O utilities (e.g., CSV/NetCDF readers, checking input files)
-    │   ├── forcing.cpp         # Reads forcing data (e.g., precipitation, temperature) from NetCDF files.
-    │   └── forcing.hpp         # Declares functions for reading NetCDF forcing data.
-    |   ├── parameters.cpp      # Reads spatially varying model parameters from CSV files.
-    │   └── parameters.hpp      # Declares functions for reading parameter data from CSV files.
-    |   ├── config_yaml.cpp     # Parses YAML configuration files for model settings and I/O paths.
-    │   └── config_yaml.hpp     # Declares functions for parsing YAML configuration files.
+    |   ├── config_loader.cpp     # Parses YAML configuration files for model settings and I/O paths
+    │   └── config_loader.hpp     # Declares functions for parsing YAML configuration files
+    │   └── forcing_data.cu
+    │   └── forcing_data.h        
+    │   ├── forcing_loader.cpp         # Reads forcing data (e.g., precipitation, temperature) from NetCDF files
+    │   └── forcing_loader.hpp         # Declares functions for reading NetCDF forcing data
+    |   ├── parameters_loader.cpp      # Reads spatially varying model parameters from CSV files
+    │   └── parameters_loader.hpp      # Declares functions for reading parameter data from CSV files
+    │   └── output_serie.cpp
+    │   └── output_series.hpp      
+
     │
     ├── solver/                 # Core RK45 solver components
     │   ├── rk45.h              # Low‐level kernel prototype (templated kernel)
