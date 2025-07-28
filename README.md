@@ -27,21 +27,24 @@ root/
     ├── Makefile                # Builds everything with nvcc (see below)
     │
     ├── main.cpp                # Host driver: calls setModelParameters<T>() and run_rk45<T>()
+    ├── simulation_driver.hpp                # Host driver: calls setModelParameters<T>() and run_rk45<T>()
+    ├── stream.hpp
     ├── model_registry.hpp      # Declares inline setModelParameters<T>(…) and extern devParams
     ├── model_registry.cpp      # Defines the single __constant__ devParams for DummyModel
+    ├── debug_kernels.cu
+    ├── debug_kernels.hpp
     │
     ├── I_O/                    # I/O utilities (e.g., CSV/NetCDF readers, checking input files)
     |   ├── config_loader.cpp     # Parses YAML configuration files for model settings and I/O paths
     │   └── config_loader.hpp     # Declares functions for parsing YAML configuration files
-    │   └── forcing_data.cu
-    │   └── forcing_data.h        
+    │   ├── forcing_data.cu
+    │   ├── forcing_data.h        
     │   ├── forcing_loader.cpp         # Reads forcing data (e.g., precipitation, temperature) from NetCDF files
     │   └── forcing_loader.hpp         # Declares functions for reading NetCDF forcing data
     |   ├── parameters_loader.cpp      # Reads spatially varying model parameters from CSV files
-    │   └── parameters_loader.hpp      # Declares functions for reading parameter data from CSV files
-    │   └── output_serie.cpp
-    │   └── output_series.hpp      
-
+    │   ├── parameters_loader.hpp      # Declares functions for reading parameter data from CSV files
+    │   ├── output_serie.cpp
+    │   └── output_series.hpp
     │
     ├── solver/                 # Core RK45 solver components
     │   ├── rk45.h              # Low‐level kernel prototype (templated kernel)
@@ -49,10 +52,14 @@ root/
     │   ├── rk45_step_dense.cuh # Device‐side Dormand–Prince step (calls Model::rhs inside) and dense output
     │   └── rk45_api.hpp        # Host‐side “run_rk45<T>” and setModelParameters<T>() wrapper
     │
-    └── models/                 
-        ├── model_dummy.hpp     # Declares DummyModel::UID, Parameters, __device__ rhs(...), extern devParams
-        └── model_dummy.cu      # Defines “__constant__ DummyModel::Parameters devParams;”
-        └── … (future models go here, e.g. model_foo.hpp + model_foo.cu) …
+    └──  models/                 
+        ├── model_204_global.cu     
+        ├── model_204.hpp     
+        ├── ETmethods.cpp
+        ├── ETmethods.hpp
+        ├── soiltemp.cpp
+        └── soiltemp.hpp
+
 ```
 
 **Setting Up the Environment**
