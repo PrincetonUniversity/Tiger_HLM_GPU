@@ -29,10 +29,6 @@ root/
     ├── main.cpp                # Host driver: calls setModelParameters<T>() and run_rk45<T>()
     ├── simulation_driver.hpp                # Host driver: calls setModelParameters<T>() and run_rk45<T>()
     ├── stream.hpp
-    ├── model_registry.hpp      # Declares inline setModelParameters<T>(…) and extern devParams
-    ├── model_registry.cpp      # Defines the single __constant__ devParams for DummyModel
-    ├── debug_kernels.cu
-    ├── debug_kernels.hpp
     │
     ├── I_O/                    # I/O utilities (e.g., CSV/NetCDF readers, checking input files)
     |   ├── config_loader.cpp     # Parses YAML configuration files for model settings and I/O paths
@@ -54,7 +50,9 @@ root/
     │
     └──  models/                 
         ├── model_204_global.cu     
-        ├── model_204.hpp     
+        ├── model_204.hpp
+    	├── model_registry.hpp	# Declares inline setModelParameters<T>(…) and extern devParams
+   	 ├── model_registry.cpp	# Defines the single __constant__ devParams for DummyModel   
         ├── ETmethods.cpp
         ├── ETmethods.hpp
         ├── soiltemp.cpp
