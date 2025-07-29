@@ -61,6 +61,7 @@ struct ModelConfig {
     std::string output_file;
     bool final_output;
     std::string final_output_file;
+    std::string runoff_output_file;
 
     // Compression level for NetCDF (0-9, default 0)
     int output_compression_level = 0;        
