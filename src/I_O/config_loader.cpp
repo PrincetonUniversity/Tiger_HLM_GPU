@@ -418,6 +418,8 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     config.output_file = parser.getString("output.output_file");
     config.final_output = parser.getBool("output.final_output");
     config.final_output_file = parser.getString("output.final_output_file");
+    config.runoff_output_file = parser.getString("output.runoff_output_file");
+
 
     // Compression level for NetCDF
     config.output_compression_level = parser.getInt("output.compression_level");

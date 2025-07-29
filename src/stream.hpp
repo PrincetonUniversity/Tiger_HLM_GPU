@@ -20,13 +20,13 @@
  */
 template<class Model>
 struct Stream {
-    long id;                     ///< Unique identifier for this stream
-    long next_id;                ///< ID of downstream (next) stream 
+    long id;                     // Unique identifier for this stream
+    long next_id;                // ID of downstream (next) stream 
     
-    SpatialParams sp;            ///< Per-stream spatial parameters
-                                 ///<   (fields match Model204::rhs’s stubbed inputs)
+    SpatialParams sp;            // Per-stream spatial parameters
+                                 // fields match Model204::rhs’s stubbed inputs)
     
-    std::array<double, Model::N_EQ> y0;  ///< Initial state [h_snow, h_static, h_surface, h_grav, h_aquifer]
+    std::array<double, Model::N_EQ> y0;  // Initial state [h_snow, h_static, h_surface, h_grav, h_aquifer]
 
     /**
      * @brief Construct a Stream from a SpatialParams record and a common initial state.
@@ -42,16 +42,3 @@ struct Stream {
       , y0(_y0)
     {}
 };
-// Create an object called stream !!!
-// class Stream {
-//   StreamData _d;
-//   std::array<double,N> _y0;
-// public:
-//   Stream(SpatialParams sp, std::array<double,N> y0)
-//     : _d{sp.stream, sp.next_stream, sp}
-//     , _y0(y0)
-//   {}
-//   // add methods, validation, operator<<, etc.
-//   StreamData const& data() const noexcept { return _d; }
-//   auto const&       y0()   const noexcept { return _y0; }
-// };

@@ -11,22 +11,6 @@
 #include "models/model_204.hpp"     // For Model204::N_EQ, ::SP_TYPE, etc.
 #include "I_O/forcing_data.h"
 
-// ========== GLOBAL FORCING SYMBOLS ==========
-
-// device pointer to flattened [forcing][time][stream] data
-// extern float*  d_forc_data;
-// number of distinct NetCDF variables you’re forcing with
-// extern int     nForc;
-// per‐forcing time step (dt) in constant memory:
-//__constant__ double c_forc_dt[4];
-// per‐forcing number of time steps in constant memory:
-//__constant__ size_t c_forc_nT[4];
-
-// device pointers for forcing data and its count
-// __device__ float* d_forc_data_dev;
-// __device__ int    nForc_dev;
-
-
 
 // ────────────────────────────────────────────────
 // ────────── Forward‐declare your Radau‐only kernel ──────────

@@ -143,6 +143,33 @@ struct Model204
             dydt[STATE_SNOW] = -snowmelt;
         }
 
+        // ── 7) snow tank new ────────────────────────────────────── 
+        // double x1 = 0.0;
+        // double melt_thr = 0.0; // melt threshold
+        // if (temperature < temp_thr)//temp_thr is the accumulation threshold
+        // { 
+        //     // If temperature is below accumulation threshold, all rainfall accumulates as snow  
+        //     x1 = 0.0;
+        //     dydt[STATE_SNOW] = rainfall;
+        //     //Accumulate precip as snow and melt out
+        //     if (temperature > melt_thr){
+        //         double snowmelt = fmin(h_snow, temperature * melt_f);
+        //         x1 = snowmelt;
+        //         dydt[STATE_SNOW] = -snowmelt; 
+        //     }                     
+        // }
+        // else if (temperature >= temp_thr){ 
+        //     //default for tmp< mlt_thr
+        //     double x1 = rainfall;
+        //     dydt[STATE_SNOW] = 0;
+        //     //default for tmp>= mlt_thr
+        //     if (temperature > melt_thr){
+        //         double snowmelt = fmin(h_snow, temperature * melt_f);
+        //         x1 = rainfall + snowmelt;
+        //         dydt[STATE_SNOW] = -snowmelt;
+        //     }
+        // }
+
         // ── 8) static tank ─────────────────────────────────────
         double x2 = fmax(0.0, x1 + h_stat - Hu); // water that enters second storage (surface) tank [m/min]
         if (frozen_ground) x2 = x1; // if frozen, all water goes to surface tank

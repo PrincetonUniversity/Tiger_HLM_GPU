@@ -1,75 +1,83 @@
-# simulation.yaml
+description: |
+  This config sets up Model204 to run with ERA5-Land 2019 data,
+  over a full year, in 5-day time chunks, using NetCDF inputs and
+  outputs written to scratch.
 
-# ── 1) Which Model ─────────────────────────────────────────────────────────────
+  Author: Your Name
+  Date: July 2025
+  
 model:
-  uid: 204                        # Model UID
-  name: Model204                  # Optional human‐readable name
+  uid: 204                        # Unique numeric identifier for the model
+  name: "Model204"                # Name of the model class
 
-# ── 2) Simulation Time Span ───────────────────────────────────────────────────
-time:
-  start: "2021-01-01T00:00:00"    # ISO8601 for t=0
-  end:   "2021-10-01T00:00:00"     # for output control only
+time_period:
+  start: "2019-12-30"             # Start date of the simulation (inclusive)
+  end: "2019-12-31"               # End date of the simulation (inclusive)
 
-# ── 3) Initial Conditions ─────────────────────────────────────────────────────
 initial:
-  mode: hot                       # "cold" or "hot"
-  file: "inits/inicond_204.uini"  # only if mode: hot
+  mode: "constant"               # How to initialize state: "constant" or "from_file"
+  file: ""                       # Path to file (if mode is "from_file")
 
-# ── 4) Global Parameters ──────────────────────────────────────────────────────
-#    leave empty if your model doesn’t use any globals
-global_params:
-  - name: foo
-    value: 0.0
+parameters:
+  path: "../data/"               # Directory where parameter files live
+  spatially_varying_file: "large_twice_params.csv"  # CSV file with per-link parameters
+  constant_parameters_index: [1, 2, 3]               # Indices (variable numbers) for constants
+  constant_parameters_values: [0.1, 0.05, 0.01]      # Values for the constant parameters (same order)
 
-# ── 5) Local (per‐link) Parameters ─────────────────────────────────────────────
-local_params:
-  file: "params/stream_params.csv"
-  columns:
-    stream_id:      0
-    next_stream_id: 1
-    params_start:   2
-    num_params:    15
-
-# ── 6) Forcings ────────────────────────────────────────────────────────────────
 forcings:
-  type:    folder_nc
-  path:    "/data/forcings/2021"
-  lookup:  "forcings_lookup.csv"
-  vars:
-    precipitation: "PRCP"
-    temperature:   "Tair"
-    # doy is computed internally from time.start and t
+  type: "netcdf"                 # Input format for forcings ("netcdf", could support others)
+  path: "../data/"               # Directory containing NetCDF forcing files
+  time_chunking: true            # Whether to load forcing data in chunks (useful for long time periods)
 
-# ── 7) Outputs ─────────────────────────────────────────────────────────────────
+  variables:
+    - name: "pr"                             # Logical name of forcing (used internally)
+      file: "pr_hourly_era5land_{year}_2xlarge.nc"  # NetCDF filename
+      var_name: "pr"                         # Name of the variable inside the NetCDF file
+      time_resolution: "1h"                  # Time resolution: "1h", "24h", etc.
+      # time_chunk_size: 5                     # Number of days per chunk to load into memory
+      required: true                         # If false, can be missing — default/zero-filled
+
+    - name: "t2m"                            # Logical name of another forcing variable
+      file: "t2m_daily_avg_era5land_{year}_2xlarge.nc" # NetCDF filename
+      var_name: "t2m"                        # Name of the variable inside the NetCDF file
+      time_resolution: "24h"                 # Time resolution: "1h", "24h", etc.
+      # time_chunk_size: 5                     # Number of days per chunk to load into memory
+      required: true                        # If false, can be missing — default/zero-filled
+
+forcing_mappings:
+  path: "../data/"               # Path to lookup files that map stream ID → lat/lon
+  variables:
+    - name: "pr"                 # Must match name in `forcings.variables`
+      file: "large_twice_pr_lookup.csv"    # CSV with stream ID → lat/lon gridpoint
+    - name: "t2m"
+      file: "large_twice_t2m_lookup.csv"
+
 output:
-  print_interval: "1h"           # e.g. "15m", "1h", "1d"
-  # omit “states:” to mean “all model states”
-  states:                        # explicitly list if you want only a subset
-    - 0   # snow
-    - 1   # static
-    - 2   # surface
-    - 3   # grav
-    - 4   # aquifer
+  print_interval: 1              # Controls how often to print (e.g. chunk index or timestep)
+  states: [0, 1, 2, 3, 4, 5, 6, 7, 8]  # Which state variables to output
+  output_path: "/scratch/gpfs/mb6477/Tiger_HLM_GPU/outputs"  # Where to store results
+  output_file: "dense.nc"        # Default dense output filename (can be overridden per chunk)
+  final_output: true             # Whether to write final state snapshot
+  final_output_file: "final.nc"  # Name of the final state NetCDF file
+  #compression_level: 3   # ← new (0-9). Omit to keep default 0
 
-# ── 8) RK45 Solver Settings ───────────────────────────────────────────────────
 solver:
-  method: RK45
-  tolerances:
-    rtol:      1e-6
-    atol:      1e-9
-    safety:    0.9
-    min_scale: 0.2
-    max_scale: 10.0
-  initial_step: null             # null → auto‐scaled
+  rtol: 1e-6                     # Relative tolerance for ODE solver
+  atol: 1e-9                     # Absolute tolerance for ODE solver
+  safety: 0.9                    # Safety factor for adaptive time step scaling
+  min_scale: 0.2                 # Minimum allowed scaling for time step reduction
+  max_scale: 10.0                # Maximum allowed scaling for time step growth
+  override_tolerances: true      # If true, forces the use of rtol/atol here
+  initial_step: 0.001            # Suggested initial time step (in minutes)
+  override_initial_step: true    # If true, overrides automatic h0 guess with this value
 
-# ── 9) Parallel‐run Buffers ────────────────────────────────────────────────────
-mpi:
-  step_storage:     30           # max RK steps to keep per link
-  transfer_buffer: 10            # max steps sent between procs
-  # discontinuity buffering not used; omit or set to 0
-  discontinuity_buf: 0
-
-# ── 10) Miscellaneous Flags ──────────────────────────────────────────────────
 flags:
-  uses_dam:     false
-  convert_area: false
+  use_mpi: true                # Set to false to disable MPI and run in serial
+  uses_dam: false                # Whether to include dam operation logic (if model supports it)
+  convert_area: false            # Whether to apply unit conversion to area values (e.g. mm → m³)
+
+# These settings are needed for MPI parallel execution for splitting basins
+# mpi:
+#   step_storage: 10               # Number of timesteps to retain in memory per process
+#   transfer_buffer: 1000          # MPI buffer size for inter-process data transfer
+#   discontinuity_buf: 50          # Buffer space to handle discontinuities or jump points

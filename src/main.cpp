@@ -1,4 +1,5 @@
 // main_new.cpp
+// simualtion_driver.cpp
 // Standard Library Headers
 #include <cstdio>       // for printf, fprintf
 #include <cstdlib>      // for std::exit
@@ -14,6 +15,7 @@
 #include <stdexcept>    // for std::runtime_error
 #include <iostream>     // for std::cout, std::cerr
 #include <ctime>        // for std::tm, timegm
+#include <filesystem>   // for std::filesystem::path (used to get filename)
 
 // CUDA & GPU Headers
 #include <cuda_runtime.h>           // CUDA runtime API
@@ -30,7 +32,7 @@
 
 // Model & Parameters
 #include "models/model_204.hpp"    // Brings in SpatialParams and model-specific logic
-#include "model_registry.hpp"      // Registers models and parameters
+#include "models/model_registry.hpp"      // Registers models and parameters
 #include "stream.hpp"              // Stream wrapper for simulation (manages model ID, initial state, etc.)
 #include "config_loader.hpp"       // Loads model configuration settings (e.g., from JSON)
 #include "parameters_loader.hpp"   // Loads parameters (e.g., spatial or physical) from CSV
@@ -97,6 +99,50 @@ bool validateArgs(int argc) {
     return true;
 }
 
+// ─────────  Logging Utilities ─────────
+void printSeparator() {
+    std::cout << "────────────────────────────────────────────────────────────\n";
+}
+
+void printSimHeader(int year, int startDay, int endDay, int numSystems) {
+    printSeparator();
+    std::cout << "[SIM]   Year: " << year 
+              << "  | Days: " << startDay << " → " << endDay
+              << "  | Systems: " << numSystems << "\n";
+    printSeparator();
+}
+
+void logInfo(const std::string& msg) {
+    // Log general information messages
+    std::cout << "[INFO]  " << msg << "\n";
+}
+
+void logGpu(const std::string& msg) {
+    //  // Log GPU-specific messages
+    std::cout << "[GPU]   " << msg << "\n";
+}
+
+void logTimer(const std::string& label, double seconds) {
+    // Log the elapsed time with fixed precision
+    std::cout << "[TIMER] " << label << ": " 
+              << std::fixed << std::setprecision(2) 
+              << seconds << " s\n";
+}
+
+void logWrite(const std::string& file, int compression) {
+   
+    // Log the file name and compression level
+    // std::cout << "[WRITE] Compression for all outputs: " << compression << "\n";
+    std::cout << "[WRITE] " << file << "\n";
+}
+
+void logDone(int systems, int queries) {
+    // Log that outputs have been written
+    std::cout << "[DONE]  Outputs written (" 
+              << systems << " × " << queries << ")\n";
+    printSeparator();
+}
+ 
 
 // ───────── Load model configuration from YAML ─────────
 bool loadConfiguration(const std::string& path, ModelConfig& config) {
@@ -310,9 +356,8 @@ bool isLeapYear(int year) {
 
 // ───────── Loop over a single simulation year ─────────
 void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Model204>>& streams) {
-    std::cout << "\n[SIM] Starting simulation for year: " << year << "\n";
-    std::cout << "----------------------------------------------------\n";
-
+    // std::cout << "\n[SIM] Starting simulation for year: " << year << "\n";
+    // std::cout << "----------------------------------------------------\n";
 
     // Initialize chunk start date
     int chunkStartYear = year, chunkStartMon = 1, chunkStartDay = 1;
@@ -331,13 +376,16 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Model2
     int start_day = (start_tm.tm_year + 1900 == year) ? computeDayOfYear(start_tm) : 0;
     int end_day   = (end_tm.tm_year + 1900 == year)   ? computeDayOfYear(end_tm)   : (TOTAL_DAYS - 1);
 
-    std::cout << "[INFO] Simulating year " << year
-          << " from day " << start_day
-          << " to day " << end_day
-          << " (inclusive)\n";
+    // std::cout << "[INFO] Simulating year " << year
+    //       << " from day " << start_day
+    //       << " to day " << end_day
+    //       << " (inclusive)\n";
 
     // int DAYS_PER_CHUNK = computeDaysPerChunk(num_systems);
     int DAYS_PER_CHUNK = -1;
+
+    // Print simulation header
+    printSimHeader(year, start_day, end_day, num_systems);
 
     // Check if any forcing variable has a valid, positive chunk size
     for (const auto& f : config.forcing_variables) {
@@ -350,7 +398,7 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Model2
     // Fallback to auto-compute
     if (DAYS_PER_CHUNK <= 0) {
         DAYS_PER_CHUNK = computeDaysPerChunk(num_systems);
-        std::cout << "[INFO] No time_chunk_size specified. Using computed DAYS_PER_CHUNK = "
+        std::cout << "[INFO] Using computed DAYS_PER_CHUNK = "
                 << DAYS_PER_CHUNK << "\n";
     } else {
         std::cout << "[INFO] Using user-specified DAYS_PER_CHUNK = " << DAYS_PER_CHUNK << "\n";
@@ -378,8 +426,9 @@ int computeDaysPerChunk(int num_systems) {
     double max_chunk_days = (double(MAX_BYTES) / (8.0 * N_EQ * num_systems) - 1.0) / 24.0;
     int DAYS_PER_CHUNK = std::max(1, int(std::floor(max_chunk_days)));
 
-    std::cout << "[INFO] Auto-selected DAYS_PER_CHUNK = " << DAYS_PER_CHUNK
-              << " (based on memory limit and " << num_systems << " systems)\n";
+    // std::cout << "[INFO] Auto-selected DAYS_PER_CHUNK = " << DAYS_PER_CHUNK
+    //           << " (based on memory limit)\n";
+              // << num_systems << " systems)\n";
 
     return DAYS_PER_CHUNK;
 }
@@ -417,8 +466,10 @@ void simulateChunk(const ModelConfig& config,
     TimePoint t_solver_start = Clock::now();
     SolverOutputs solverOutputs = launchSolverKernel(solverInputs);
     TimePoint t_solver_end = Clock::now();
-    std::cout << "[TIMER] Solver took " 
-            << elapsedSeconds(t_solver_start, t_solver_end) << " seconds\n";
+    // std::cout << "[TIMER] Solver took " 
+    //         << elapsedSeconds(t_solver_start, t_solver_end) << " seconds\n";
+    logTimer("Solver runtime", elapsedSeconds(t_solver_start, t_solver_end));
+
 
     // ───────── Retrieve results and handle outputs ─────────
     TimePoint t_output_start = Clock::now();
@@ -477,7 +528,12 @@ void uploadForcingsToGpu(NCForcing& chunk) {
     CUDA_CHECK(cudaMemcpyToSymbol(c_forc_dt, chunk.dt.data(), sizeof(double) * chunk.nForc));
     CUDA_CHECK(cudaMemcpyToSymbol(c_forc_nT, chunk.nT.data(), sizeof(size_t) * chunk.nForc));
 
-    std::cout << "[INFO] Forcing data uploaded to GPU (size: " << (bytes / (1024.0 * 1024.0)) << " MiB)\n";
+    // std::cout << "[INFO] Forcing data uploaded to GPU (size: " << (bytes / (1024.0 * 1024.0)) << " MiB)\n";
+    // logInfo("Forcing uploaded to GPU (" + std::to_string(bytes / (1024.0 * 1024.0)) + " MiB)");
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2) << (bytes / (1024.0 * 1024.0));
+    logInfo("Forcing uploaded to GPU (" + oss.str() + " MiB)");
+
 }
 
 // ───────── Setup solver time bounds, initial conditions, and query times
@@ -505,9 +561,9 @@ SolverInputs prepareSolverInputs(int simYear,
     for (double m = input.t0; m <= input.tf; m += 60.0)
         input.h_query_times.push_back(m);
 
-    std::cout << "[INFO] Prepared solver inputs: "
-              << input.h_query_times.size() << " query times, "
-              << num_systems << " systems.\n";
+    // std::cout << "[INFO] Prepared solver inputs: "
+    //           << input.h_query_times.size() << " query times, "
+    //           << num_systems << " systems.\n";
 
     return input;
 }
@@ -540,12 +596,17 @@ SolverOutputs launchSolverKernel(const SolverInputs& input) {
 
     int numBlocks = (out.num_systems + blockSize - 1) / blockSize;
 
-    std::cout << "[LAUNCH] Kernel with blocks=" << numBlocks
-              << ", threads/block=" << blockSize << "\n";
+    // std::cout << "[LAUNCH] Kernel with blocks=" << numBlocks
+    //           << ", threads/block=" << blockSize << "\n";
 
-    std::cout << "[DEBUG] Launching with: "
-          << " num_systems=" << out.num_systems
-          << " num_queries=" << out.num_queries << "\n";
+    // std::cout << "[GPU] Launching with:"
+    //       << " num_systems=" << out.num_systems
+    //       << " num_queries=" << out.num_queries << "\n";
+    logGpu("Launching kernel: blocks=" + std::to_string(numBlocks) +
+       ", threads=" + std::to_string(blockSize));
+    logGpu("Systems=" + std::to_string(out.num_systems) +
+       ", Queries=" + std::to_string(out.num_queries));
+
 
     SpatialParams* d_sp = nullptr;
     cudaMemcpyFromSymbol(&d_sp, devSpatialParamsPtr, sizeof(d_sp));
@@ -621,34 +682,71 @@ void handleSolverOutputs(const ModelConfig& config,
     std::string time_origin = std::to_string(simYear) + "-01-01T00:00:00Z";
 
     // Write final state to NetCDF (2D)
-    std::cout << "[WRITE] final: " << final_file << "\n";
-    write_final_netcdf(final_file,
-                       h_y_final.data(),
-                       link_ids.data(),
-                       state_ids.data(),
-                       ns, N_EQ,
-                       config.output_compression_level);
+    // std::cout << "[WRITE] final: " << final_file << "\n";
+    // write_final_netcdf(final_file,
+    //                    h_y_final.data(),
+    //                    link_ids.data(),
+    //                    state_ids.data(),
+    //                    ns, N_EQ,
+    //                    config.output_compression_level);
+    if (!config.final_output_file.empty()) {
+        // std::cout << "[WRITE] final: " << final_file << "\n";
+        logWrite("final.nc", config.output_compression_level);
+        // std::cout << "[DEBUG] Writing with compression level: " << config.output_compression_level << std::endl;
+
+        write_final_netcdf(final_file, h_y_final.data(),
+                        link_ids.data(), state_ids.data(),
+                        ns, N_EQ, config.output_compression_level);
+    } else {
+        std::cout << "[SKIP] final output disabled via config\n";
+    }
+
 
     // Write dense time output to NetCDF (3D) 
-    std::cout << "[WRITE] dense: " << dense_file << "\n";
-    write_dense_netcdf(dense_file,
-                       h_dense.data(),
-                       input.h_query_times.data(),
-                       link_ids.data(),
-                       state_ids.data(),
-                       nq, ns, N_EQ,
-                       time_origin,
-                       config.output_compression_level);
+    // std::cout << "[WRITE] dense: " << dense_file << "\n";
+    // write_dense_netcdf(dense_file,
+    //                    h_dense.data(),
+    //                    input.h_query_times.data(),
+    //                    link_ids.data(),
+    //                    state_ids.data(),
+    //                    nq, ns, N_EQ,
+    //                    time_origin,
+    //                    config.output_compression_level);
+    if (!config.output_file.empty()) {
+        // std::cout << "[WRITE] dense: " << dense_file << "\n";
+        logWrite("dense.nc", config.output_compression_level);
+        // std::cout << "[DEBUG] Writing with compression level: " << config.output_compression_level << std::endl;
+        write_dense_netcdf(dense_file, h_dense.data(),
+                        input.h_query_times.data(),
+                        link_ids.data(), state_ids.data(),
+                        nq, ns, N_EQ, time_origin,
+                        config.output_compression_level);
+    } else {
+        std::cout << "[SKIP] dense output disabled via config\n";
+    }
+
 
     // Write selected runoff states
-    std::cout << "[WRITE] runoff: " << runoff_file << "\n";
-    write_runoff_dense_netcdf(runoff_file,
-                              h_dense.data(),
-                              input.h_query_times.data(),
-                              link_ids.data(),
-                              nq, ns,
-                              time_origin,
-                              config.output_compression_level);
+    if (!config.runoff_output_file.empty()) {
+        std::string runoff_file = config.output_path + "/runoff_"  + prefix + sDate + "_" + eDate + ".nc";
+        // std::cout << "[WRITE] runoff: " << runoff_file << "\n";
+        // logWrite("runoff.nc", config.output_compression_level);
+        logWrite(std::filesystem::path(runoff_file).filename().string(),config.output_compression_level);
+        // std::cout << "[DEBUG] Writing with compression level: " << config.output_compression_level << std::endl;
+        write_runoff_dense_netcdf(runoff_file,
+                                h_dense.data(),
+                                input.h_query_times.data(),
+                                link_ids.data(),
+                                nq, ns,
+                                time_origin,
+                                config.output_compression_level);
+    } else {
+        std::cout << "[SKIP] runoff output disabled via config\n";
+    }
+
+    
+
+
 
     std::cout << "[DONE] Outputs written for " << ns << " systems × " << nq << " time steps\n";
 }
@@ -735,6 +833,7 @@ int main(int argc, char** argv) {
 
     if (usingMPI && rank == 0) {
         // Root rank loads and distributes SpatialParams to workers
+        std::cout << "[RANK 0] Acting as coordinator only\n";
         distributeSpatialParams(config, size);
         // Early exit: rank 0 is just a coordinator/distributor
         MPI_Finalize();

@@ -36,17 +36,6 @@
  *   t0           : initial time of integration.
  *   tf           : final time of integration.
  */
-// template <class Model>
-// __global__ void rk45_kernel_multi(
-//     double* y0_all,
-//     double* y_final_all,
-//     double* query_times,
-//     double* dense_all,
-//     int     num_systems,
-//     int     num_queries,
-//     double  t0,
-//     double  tf
-// );
 
 template <class Model>
 __global__ void rk45_then_radau_multi(

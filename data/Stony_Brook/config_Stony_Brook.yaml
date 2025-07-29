@@ -1,0 +1,80 @@
+description: |
+  This config sets up Model204 to run with AORC - 1km data for 2017 and 2018,
+  time chunks are automatically calculated, using NetCDF inputs and
+  outputs written to the path you specify.
+  
+model:
+  uid: 204                        # Unique numeric identifier for the model
+  name: "Model204"                # Name of the model class
+
+time_period:
+  start: "2017-01-01"             # Start date of the simulation (inclusive)
+  end: "2018-12-31"               # End date of the simulation (inclusive)
+
+initial:
+  mode: "constant"               # How to initialize state: "constant" or "from_file"
+  file: ""                       # Path to file (if mode is "from_file")
+
+parameters:
+  path: "./data/Stony_Brook/" # Change path your input directory              # Directory where parameter files live
+  spatially_varying_file: "./Stony_Brook_spatial_params.csv"  # CSV file with per-link parameters
+  constant_parameters_index: [1, 2, 3]               # Indices (variable numbers) for constants
+  constant_parameters_values: [0.1, 0.05, 0.01]      # Values for the constant parameters (same order)
+
+forcings:
+  type: "netcdf"                 # Input format for forcings ("netcdf", could support others)
+  path: "../data/Stony_Brook/"                      # Directory containing NetCDF forcing files
+  time_chunking: true            # Whether to load forcing data in chunks (useful for long time periods)
+
+  variables:
+    - name: "pr"                             # Logical name of forcing (used internally)
+      file: "pr_hourly_AORC_{year}.nc"  # NetCDF filename
+      var_name: "pr"                         # Name of the variable inside the NetCDF file
+      time_resolution: "1h"                  # Time resolution: "1h", "24h", etc.
+      # time_chunk_size: 5                     # Number of days per chunk to load into memory, if specified then use this instea d of automatic chunking
+      required: true                         # If false, can be missing — default/zero-filled
+
+    - name: "t2m"                            # Logical name of another forcing variable
+      file: "t2m_daily_avg_AORC_{year}.nc" # NetCDF filename
+      var_name: "t2m"                        # Name of the variable inside the NetCDF file
+      time_resolution: "24h"                 # Time resolution: "1h", "24h", etc.
+      # time_chunk_size: 5                     # Number of days per chunk to load into memory, if specified then use this instea d of automatic chunking
+      required: true                        # If false, can be missing — default/zero-filled
+
+forcing_mappings:
+  path: "." # Change path your input directory   # Path to lookup files that map stream ID → lat/lon
+  variables:
+    - name: "pr"                                 # Must match name in `forcings.variables`
+      file: "Stony_Brook_pr_AORC_lookup.csv"     # CSV with stream ID → lat/lon gridpoint
+    - name: "t2m"
+      file: "Stony_Brook_t2m_AORC_lookup.csv"
+
+output:
+  print_interval: 1              # Controls how often to print (e.g. chunk index or timestep)
+  states: [0, 1, 2, 3, 4, 5, 6, 7, 8]  # Which state variables to output
+  output_path: "./data/Stony_Brook/outputs/"  # Where to store results
+  output_file: "dense.nc"        # Default dense output filename (can be overridden per chunk)
+  final_output_file: "final.nc"  # Name of the final state NetCDF file
+  runoff_output_file: "runoff.nc"       # optional 
+  compression_level: 3   # (0-9). Omit to keep default 0
+
+solver:
+  rtol: 1e-6                     # Relative tolerance for ODE solver
+  atol: 1e-9                     # Absolute tolerance for ODE solver
+  safety: 0.9                    # Safety factor for adaptive time step scaling
+  min_scale: 0.2                 # Minimum allowed scaling for time step reduction
+  max_scale: 10.0                # Maximum allowed scaling for time step growth
+  override_tolerances: true      # If true, forces the use of rtol/atol here
+  initial_step: 0.001            # Suggested initial time step (in minutes)
+  override_initial_step: true    # If true, overrides automatic h0 guess with this value
+
+flags:
+  use_mpi: true                # Set to false to disable MPI and run in serial
+  uses_dam: false                # Whether to include dam operation logic (if model supports it)
+  convert_area: false            # Whether to apply unit conversion to area values (e.g. mm → m³)
+
+# These settings are needed for MPI memory management and inter-process communication
+# mpi:
+#   step_storage: 10               # Number of timesteps to retain in memory per process
+#   transfer_buffer: 1000          # MPI buffer size for inter-process data transfer
+#   discontinuity_buf: 50          # Buffer space to handle discontinuities or jump points
