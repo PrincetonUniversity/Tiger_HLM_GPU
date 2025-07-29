@@ -52,7 +52,7 @@ root/
         ├── model_204_global.cu     
         ├── model_204.hpp
     	├── model_registry.hpp	# Declares inline setModelParameters<T>(…) and extern devParams
-   	 ├── model_registry.cpp	# Defines the single __constant__ devParams for DummyModel   
+	├── model_registry.cpp	# Defines the single __constant__ devParams for DummyModel   
         ├── ETmethods.cpp
         ├── ETmethods.hpp
         ├── soiltemp.cpp
