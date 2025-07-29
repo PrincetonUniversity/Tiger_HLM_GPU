@@ -256,10 +256,10 @@ __global__ void debugMinuteForcings(const float *forc, int ns) {
     }
 }
 
-// ----------------------------------------------------------------------
+// ────────────────────────────────────────────────────────────────────────
 // Kernel to debug the way rhs reads F[0] (rain) and F[1] (temp),
 // now also printing sys index and stream ID
-// ----------------------------------------------------------------------
+// ────────────────────────────────────────────────────────────────────────
 __global__ void debugRhsForcings(const SpatialParams* sp_ptr,
                                  const float*         F,
                                  int                  ns,
