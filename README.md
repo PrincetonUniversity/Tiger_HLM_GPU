@@ -7,6 +7,46 @@
 Please refer to the [wiki page](https://github.com/PrincetonUniversity/Tiger_HLM_GPU/wiki) for setup instructions and detailed documentation.
 
 
+## **Build & Run**
+
+### **1. Prerequisites**
+
+Modules required: **CUDA Toolkit**, **C++14 compiler**, **NetCDF C++**, **MPI** (optional), and **NCO** (for post-processing).
+
+---
+
+### **2. Build**
+
+Clean and compile:
+
+```bash
+make clean
+make
+```
+
+Optional flags:
+
+* `DEBUG=1` → Debug build
+* `DEBUG=0` → Release build (default)
+* `VERBOSE=1` → Show build commands
+
+---
+
+### **3. Run**
+
+Serial:
+
+```bash
+./bin/runoff /path/to/config.yaml
+```
+
+MPI:
+
+```bash
+mpirun -np 2 ./bin/runoff /path/to/config.yaml
+```
+
+
 ## Directory Structure
 
 ```text
@@ -72,46 +112,6 @@ module load hdf5/gcc/openmpi-4.1.6/1.14.4
 module load netcdf/gcc/hdf5-1.14.4/openmpi-4.1.6/4.9.2
 
 ```
-
-## **Build & Run**
-
-### **1. Prerequisites**
-
-Modules required: **CUDA Toolkit**, **C++14 compiler**, **NetCDF C++**, **MPI** (optional), and **NCO** (for post-processing).
-
----
-
-### **2. Build**
-
-Clean and compile:
-
-```bash
-make clean
-make
-```
-
-Optional flags:
-
-* `DEBUG=1` → Debug build
-* `DEBUG=0` → Release build (default)
-* `VERBOSE=1` → Show build commands
-
----
-
-### **3. Run**
-
-Serial:
-
-```bash
-./bin/runoff /path/to/config.yaml
-```
-
-MPI:
-
-```bash
-mpirun -np 2 ./bin/runoff /path/to/config.yaml
-```
-
 
 
 
