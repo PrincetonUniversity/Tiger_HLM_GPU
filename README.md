@@ -73,43 +73,45 @@ module load netcdf/gcc/hdf5-1.14.4/openmpi-4.1.6/4.9.2
 
 ```
 
-## Building & Running
+## **Build & Run**
 
-1. **Prerequisites**
+### **1. Prerequisites**
 
-* CUDA Toolkit (nvcc)
-* C++14-capable compiler (e.g. `g++`)
-* NetCDF C++ library for `.nc` files
+Modules required: **CUDA Toolkit**, **C++14 compiler**, **NetCDF C++**, **MPI** (optional), and **NCO** (for post-processing).
 
-2. **Compile**
+---
 
-```
-cd src
+### **2. Build**
+
+Clean and compile:
+
+```bash
+make clean
 make
 ```
 
-This produces the executable `rk45_solver`.
+Optional flags:
 
-### **Optional Build Modes**
+* `DEBUG=1` → Debug build
+* `DEBUG=0` → Release build (default)
+* `VERBOSE=1` → Show build commands
 
-You can customize the build process using the following options:
+---
 
-* **Debug Mode** (`DEBUG=1`): Enables debugging symbols (`-g`) and disables optimizations (`-O0`) for easier debugging.
-* **Release Mode** (`DEBUG=0`): Enables optimizations (`-O2` or higher) for better performance.
-* **Verbose Mode** (`VERBOSE=1`): Prints detailed compilation commands during the build process.
+### **3. Run**
 
-3. **Run**
+Serial:
 
+```bash
+./bin/runoff /path/to/config.yaml
 ```
-./rk45_solver
+
+MPI:
+
+```bash
+mpirun -np 2 ./bin/runoff /path/to/config.yaml
 ```
 
-By default, it uses `DummyModel::UID`, reads `data/forcing.csv` (if present), integrates `num_systems` ODEs from `t0=0.0` to `tf=5.0`, and writes:
-
-* `final.csv` (one line per system: H0,H1,H2,H3,H4 at t=tf)
-* `dense.csv` (“time,H0\_sys0,H1\_sys0,…,H4\_sysN” at `num_queries` sample times).
-
-*Note: Steps 4 and 5 are still drafts, it works for dummy model and will be expanded to model 200/204 soon.*
 
 
 
