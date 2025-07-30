@@ -25,7 +25,7 @@ module load hdf5/gcc/openmpi-4.1.6/1.14.4
 module load netcdf/gcc/hdf5-1.14.4/openmpi-4.1.6/4.9.2
 
 ```
----
+
 
 ### **2. Build**
 
@@ -42,7 +42,7 @@ Optional flags:
 * `DEBUG=0` → Release build (default)
 * `VERBOSE=1` → Show build commands
 
----
+
 
 ### **3. Run**
 
