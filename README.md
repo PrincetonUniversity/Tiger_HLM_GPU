@@ -13,6 +13,18 @@ Please refer to the [wiki page](https://github.com/PrincetonUniversity/Tiger_HLM
 
 Modules required: **CUDA Toolkit**, **C++14 compiler**, **NetCDF C++**, **MPI** (optional), and **NCO** (for post-processing).
 
+**Setting Up the Environment**
+
+Load the required CUDA toolkit using the following command:
+
+For della gpu or gh use these as standard
+```
+module load cudatoolkit/12.9
+module load openmpi/gcc/4.1.6
+module load hdf5/gcc/openmpi-4.1.6/1.14.4
+module load netcdf/gcc/hdf5-1.14.4/openmpi-4.1.6/4.9.2
+
+```
 ---
 
 ### **2. Build**
@@ -99,20 +111,6 @@ root/
         └── soiltemp.hpp
 
 ```
-
-**Setting Up the Environment**
-
-Load the required CUDA toolkit using the following command:
-
-For della gpu or gh use these as standard
-```
-module load cudatoolkit/12.9
-module load openmpi/gcc/4.1.6
-module load hdf5/gcc/openmpi-4.1.6/1.14.4
-module load netcdf/gcc/hdf5-1.14.4/openmpi-4.1.6/4.9.2
-
-```
-
 
 
 # Citation
