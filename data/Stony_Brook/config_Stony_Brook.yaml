@@ -1,15 +1,15 @@
 description: |
-  This config sets up Model204 to run with AORC - 1km data for 2017 and 2018,
+  This config sets up Runoff5 to run with forcing data (precipitation and temeprature) for 2017 and 2018,
   time chunks are automatically calculated, using NetCDF inputs and
   outputs written to the path you specify.
   
 model:
-  uid: 204                        # Unique numeric identifier for the model
-  name: "Model204"                # Name of the model class
+  uid: 5                       # Unique numeric identifier for the model
+  name: "Runoff5"                # Name of the model class
 
 time_period:
   start: "2017-01-01"             # Start date of the simulation (inclusive)
-  end: "2018-12-31"               # End date of the simulation (inclusive)
+  end: "2017-01-31"               # End date of the simulation (inclusive)
 
 initial:
   mode: "constant"               # How to initialize state: "constant" or "from_file"
@@ -23,23 +23,23 @@ parameters:
 
 forcings:
   type: "netcdf"                 # Input format for forcings ("netcdf", could support others)
-  path: "../data/Stony_Brook/"                      # Directory containing NetCDF forcing files
+  path: "../data/Stony_Brook/"   # Directory containing NetCDF forcing files
   time_chunking: true            # Whether to load forcing data in chunks (useful for long time periods)
 
   variables:
     - name: "pr"                             # Logical name of forcing (used internally)
-      file: "pr_hourly_AORC_{year}.nc"  # NetCDF filename
+      file: "pr_hourly_AORC_{year}.nc"       # NetCDF filename
       var_name: "pr"                         # Name of the variable inside the NetCDF file
       time_resolution: "1h"                  # Time resolution: "1h", "24h", etc.
       # time_chunk_size: 5                     # Number of days per chunk to load into memory, if specified then use this instea d of automatic chunking
       required: true                         # If false, can be missing — default/zero-filled
 
     - name: "t2m"                            # Logical name of another forcing variable
-      file: "t2m_daily_avg_AORC_{year}.nc" # NetCDF filename
+      file: "t2m_daily_avg_AORC_{year}.nc"   # NetCDF filename
       var_name: "t2m"                        # Name of the variable inside the NetCDF file
       time_resolution: "24h"                 # Time resolution: "1h", "24h", etc.
-      # time_chunk_size: 5                     # Number of days per chunk to load into memory, if specified then use this instea d of automatic chunking
-      required: true                        # If false, can be missing — default/zero-filled
+      # time_chunk_size: 5                   # Number of days per chunk to load into memory, if specified then use this instea d of automatic chunking
+      required: true                         # If false, can be missing — default/zero-filled
 
 forcing_mappings:
   path: "." # Change path your input directory   # Path to lookup files that map stream ID → lat/lon
@@ -50,13 +50,13 @@ forcing_mappings:
       file: "Stony_Brook_t2m_AORC_lookup.csv"
 
 output:
-  print_interval: 1              # Controls how often to print (e.g. chunk index or timestep)
-  states: [0, 1, 2, 3, 4, 5, 6, 7, 8]  # Which state variables to output
-  output_path: "./data/Stony_Brook/outputs/"  # Where to store results
-  output_file: "dense.nc"        # Default dense output filename (can be overridden per chunk)
-  final_output_file: "final.nc"  # Name of the final state NetCDF file
-  runoff_output_file: "runoff.nc"       # optional 
-  compression_level: 3   # (0-9). Omit to keep default 0
+  print_interval: 1                           # Controls how often to print (e.g. chunk index or timestep)
+  query_dt: 60.0                              # Interval between outputs in minutes
+  states: [0, 1, 2, 3, 4, 5, 6, 7, 8]         # Which state variables to output
+  output_path: "./data/Stony_Brook/outputs/dense_60"  # Where to store results
+  output_file: "dense.nc"                     # Default dense output filename (can be overridden per chunk)
+  final_output_file: "final.nc"               # Name of the final state NetCDF file
+  runoff_output_file: "runoff.nc"             # Name of the runoff NetCDF file
 
 solver:
   rtol: 1e-6                     # Relative tolerance for ODE solver
@@ -69,7 +69,7 @@ solver:
   override_initial_step: true    # If true, overrides automatic h0 guess with this value
 
 flags:
-  use_mpi: true                # Set to false to disable MPI and run in serial
+  use_mpi: true                  # Set to false to disable MPI and run in serial
   uses_dam: false                # Whether to include dam operation logic (if model supports it)
   convert_area: false            # Whether to apply unit conversion to area values (e.g. mm → m³)
 
