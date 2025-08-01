@@ -7,7 +7,7 @@
 #include "event_detector.cuh"
 #include "small_lu.cuh"
 #include "radau_step_dense.cuh"
-#include "models/model_204.hpp"
+#include "models/model_Runoff5.hpp"
 #include "I_O/forcing_data.h"
 
 
@@ -28,7 +28,7 @@
 // ────────────────────────────────────────────────────────────────────────────
 // Single‐kernel that does RK45 and flags stiffness, but no in‐kernel Radau.
 // ────────────────────────────────────────────────────────────────────────────
-template <class Model204>
+template <class Runoff5>
 __global__ void rk45_then_radau_multi(
     double* y0_all,       // [num_systems × N_EQ]
     double* y_final_all,  // [num_systems × N_EQ]
@@ -38,14 +38,14 @@ __global__ void rk45_then_radau_multi(
     int     num_queries,
     double  t0,
     double  tf,
-    const typename Model204::SP_TYPE* d_sp,
+    const typename Runoff5::SP_TYPE* d_sp,
     int*    d_stiff,       // flag array
     const float*  d_forc_data,  // [nForc × num_systems × nSamples]
     int           nForc       // number of forcings
 ) {
 
 
-    constexpr int N_EQ = Model204::N_EQ;
+    constexpr int N_EQ = Runoff5::N_EQ;
     int sys = blockIdx.x*blockDim.x + threadIdx.x;
     if (sys >= num_systems) return;
 
@@ -144,9 +144,9 @@ __global__ void rk45_then_radau_multi(
         
 
         // pass forcings into RHS
-        Model204::rhs(t, y, k45[0], N_EQ, sys, d_sp, Fval_arr, nForc);
-        //Model204::rhs(t, y, k45[0], N_EQ, sys, d_sp);
-        rk45_step<Model204>(t, y, y_next, N_EQ, h, rtol, atol, &err, k45, sys, d_sp, Fval_arr, nForc);
+        Runoff5::rhs(t, y, k45[0], N_EQ, sys, d_sp, Fval_arr, nForc);
+        //Runoff5::rhs(t, y, k45[0], N_EQ, sys, d_sp);
+        rk45_step<Runoff5>(t, y, y_next, N_EQ, h, rtol, atol, &err, k45, sys, d_sp, Fval_arr, nForc);
 
     // int next_q = 0, reject_count = 0;
     // bool stiff = false;
@@ -154,10 +154,10 @@ __global__ void rk45_then_radau_multi(
     // // ─── 1) Explicit RK45 phase ───
     // while(t < tf && !stiff) {
     //     if (t + h > tf) h = tf - t;
-    //     //Model204::rhs(t, y, k45[0], N_EQ, sys, d_sp);
-    //     Model204::rhs(t, y, k45[0], N_EQ, sys, d_sp, Fval_arr, nForc);
+    //     //Runoff5::rhs(t, y, k45[0], N_EQ, sys, d_sp);
+    //     Runoff5::rhs(t, y, k45[0], N_EQ, sys, d_sp, Fval_arr, nForc);
 
-    //     rk45_step<Model204>(t, y, y_next, N_EQ, h, rtol, atol, &err, k45, sys, d_sp);
+    //     rk45_step<Runoff5>(t, y, y_next, N_EQ, h, rtol, atol, &err, k45, sys, d_sp);
 
         if (err <= 1.0) {
             reject_count = 0;
@@ -173,7 +173,7 @@ __global__ void rk45_then_radau_multi(
                 double tq = query_times[next_q];
                 if (tq > t) {
                     double th = (tq - t)/h, yd[N_EQ];
-                    rk45_dense<Model204>(y, k45, N_EQ, h, th, yd);
+                    rk45_dense<Runoff5>(y, k45, N_EQ, h, th, yd);
                     for (int c=0; c<N_EQ; ++c){
                         DBG_ASSERT(sys < num_systems, "Invalid system index sys=%d", sys);
                         DBG_ASSERT(next_q < num_queries, "Invalid query index next_q=%d", next_q);
@@ -225,10 +225,10 @@ __global__ void rk45_then_radau_multi(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Explicit instantiation for Model204
+// Explicit instantiation for Runoff5
 // ────────────────────────────────────────────────────────────────────────────
 // All 12 params in order:
-template __global__ void rk45_then_radau_multi<Model204>(
+template __global__ void rk45_then_radau_multi<Runoff5>(
     double*,          // y0_all
     double*,          // y_final_all
     double*,          // query_times
@@ -237,7 +237,7 @@ template __global__ void rk45_then_radau_multi<Model204>(
     int,              // num_queries
     double,           // t0
     double,           // tf
-    const Model204::SP_TYPE*, // d_sp
+    const Runoff5::SP_TYPE*, // d_sp
     int*,             // d_stiff
     const float*,     // d_forc_data
     int               // nForc

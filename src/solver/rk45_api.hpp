@@ -8,7 +8,7 @@
 #include <cstring>                  // for std::memset
 #include "rk45.h"                   // For rk45_then_radau_multi<…> and radau_kernel_multi<…>
 #include "parameters_loader.hpp"    // for SpatialParams
-#include "models/model_204.hpp"     // For Model204::N_EQ, ::SP_TYPE, etc.
+#include "models/model_Runoff5.hpp"     // For Runoff5::N_EQ, ::SP_TYPE, etc.
 #include "I_O/forcing_data.h"
 
 
@@ -41,16 +41,16 @@ using DenseType = std::vector<double>;
 using FinalType = std::vector<double>;
 
 // ───────── 1) Allocate GPU buffers & copy inputs ─────────
-//   • h_y0 size   = num_systems * Model204::N_EQ
+//   • h_y0 size   = num_systems * Runoff5::N_EQ
 //   • h_query_times size = num_queries
 //   • Also: allocate an int flag per system for stiffness detection.
 // Returns a tuple of raw device pointers plus sizes for later teardown.
-template<class Model204>
+template<class Runoff5>
 auto setup_gpu_buffers(
     const std::vector<double>& h_y0,
     const std::vector<double>& h_query_times
 ) {
-    constexpr int N_EQ = Model204::N_EQ;
+    constexpr int N_EQ = Runoff5::N_EQ;
     int num_systems = int(h_y0.size() / N_EQ);
     int num_queries = int(h_query_times.size());
 
@@ -105,7 +105,7 @@ auto setup_gpu_buffers(
 // // ───────── 3) Copy back results & free GPU memory ─────────
 // //   We now also copy back the stiffness flags, gather which
 // //   systems are stiff, and invoke Radau only on those.
-// template<class Model204>
+// template<class Runoff5>
 // std::pair<FinalType, DenseType> retrieve_and_free(
 //     double* d_y0_all,
 //     double* d_y_final_all,
@@ -116,9 +116,9 @@ auto setup_gpu_buffers(
 //     int     num_queries,
 //     double  t0,
 //     double  tf,
-//     const typename Model204::SP_TYPE* d_sp
+//     const typename Runoff5::SP_TYPE* d_sp
 // ) {
-//     constexpr int N_EQ = Model204::N_EQ;
+//     constexpr int N_EQ = Runoff5::N_EQ;
 //     size_t bytes_final = sizeof(double) * num_systems * N_EQ;
 //     size_t bytes_dense = sizeof(double) * num_systems * N_EQ * num_queries;
 //     size_t bytes_stiff = sizeof(int)    * num_systems;            // new
@@ -158,7 +158,7 @@ auto setup_gpu_buffers(
 
 //         constexpr int TPB = 128;
 //         int blocks2 = (n_stiff + TPB - 1) / TPB;
-//         radau_kernel_multi<Model204>
+//         radau_kernel_multi<Runoff5>
 //           <<< blocks2, TPB >>>(
 //             d_y0_all,         // 1
 //             d_y_final_all,    // 2
@@ -218,7 +218,7 @@ auto setup_gpu_buffers(
 //     return { std::move(h_y_final_all), std::move(h_dense_all) };
 // }
 
-template<class Model204>
+template<class Runoff5>
 std::pair<FinalType, DenseType> retrieve_and_free(
     double* d_y0_all,
     double* d_y_final_all,
@@ -229,9 +229,9 @@ std::pair<FinalType, DenseType> retrieve_and_free(
     int     num_queries,
     double  t0,
     double  tf,
-    const typename Model204::SP_TYPE* d_sp
+    const typename Runoff5::SP_TYPE* d_sp
 ) {
-    constexpr int N_EQ = Model204::N_EQ;
+    constexpr int N_EQ = Runoff5::N_EQ;
     size_t bytes_final = sizeof(double) * num_systems * N_EQ;
     size_t bytes_dense = sizeof(double) * num_systems * N_EQ * num_queries;
     size_t bytes_stiff = sizeof(int)    * num_systems;
