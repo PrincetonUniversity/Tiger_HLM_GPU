@@ -3,7 +3,7 @@
 #include <cstdint>
 
 /**
- * @brief Write a dense 3D array to a NetCDF file with optional compression.
+ * @brief Write a dense 3D array to a NetCDF file.
  *
  * @param filename          Output NetCDF file name.
  * @param h_dense           Pointer to flattened 3D double array [system, time, variable].
@@ -13,7 +13,6 @@
  * @param num_queries       Number of time steps (size of time_vals).
  * @param num_systems       Number of systems/links (size of linkid_vals).
  * @param N_EQ              Number of state variables (size of state_vals).
- * @param compression_level Compression level (0 = no compression, 1-9 = increasing compression).
  */
 void write_dense_netcdf(const std::string& filename,
                         const double* h_dense,
@@ -24,8 +23,8 @@ void write_dense_netcdf(const std::string& filename,
                         int num_queries,
                         int num_systems,
                         int N_EQ,
-                        const std::string& time_origin, // e.g., "2023-01-01T00:00:00Z" passed from the user
-                        int compression_level = 4);
+                        const std::string& time_origin); // e.g., "2023-01-01T00:00:00Z" passed from the user
+
 
 /**
  * @brief Write a 2D array [system, variable] to a NetCDF file (no time dimension).
@@ -36,7 +35,6 @@ void write_dense_netcdf(const std::string& filename,
  * @param state_vals        Pointer to array of state variable IDs (length: N_EQ).
  * @param num_systems       Number of systems/links (size of linkid_vals).
  * @param N_EQ              Number of state variables (size of state_vals).
- * @param compression_level Compression level (0 = no compression, 1-9 = increasing compression).
  */
 void write_final_netcdf(const std::string& filename,
                         const double* h_y_final,
@@ -44,23 +42,21 @@ void write_final_netcdf(const std::string& filename,
                         const uint32_t* linkid_vals, // new: 32-bit unsigned integer
                         const int* state_vals,
                         int num_systems,
-                        int N_EQ,
-                        int compression_level = 4);
+                        int N_EQ);
 
 
 /**
  * @brief Write only the surface‐ and total‐runoff components from a dense
- *        3D array to a NetCDF file with optional compression.
+ *        3D array to a NetCDF file.
  *
  * @param filename          Output NetCDF file name.
  * @param h_dense           Pointer to flattened 3D double array [system, time, variable].
- *                          Only the entries at Model204::STATE_SURF_RUNOFF and
- *                          Model204::STATE_TOTAL_RUNOFF will be written.
+ *                          Only the entries at Runoff5::STATE_SURF_RUNOFF and
+ *                          Runoff5::STATE_TOTAL_RUNOFF will be written.
  * @param time_vals         Pointer to array of time values (length: num_queries).
  * @param linkid_vals       Pointer to array of system/link IDs (length: num_systems).
  * @param num_queries       Number of time steps (size of time_vals).
  * @param num_systems       Number of systems/links (size of linkid_vals).
- * @param compression_level Compression level (0 = no compression, 1–9 = increasing).
  */
 void write_runoff_dense_netcdf(const std::string& filename,
                               const double*      h_dense,
@@ -68,8 +64,8 @@ void write_runoff_dense_netcdf(const std::string& filename,
                               const uint32_t*    linkid_vals,
                               int                num_queries,
                               int                num_systems,
-                              const std::string& time_origin, // e.g., "2023-01-01T00:00:00Z" passed from the user
-                              int                compression_level = 4);
+                              const std::string& time_origin); // e.g., "2023-01-01T00:00:00Z" passed from the user
+                            
 
 
 
@@ -86,8 +82,7 @@ void write_runoff_dense_netcdf(const std::string& filename,
  * @param num_selected        Number of entries in selected_states (and state_names).
  * @param num_queries         Number of time steps (size of time_vals).
  * @param num_systems         Number of systems/links (size of linkid_vals).
- * @param full_N_EQ           Total number of variables in h_dense (Model204::N_EQ).
- * @param compression_level   Compression level (0 = none, 1–9 = zlib level).
+ * @param full_N_EQ           Total number of variables in h_dense (Runoff5::N_EQ).
  */
 void write_selected_dense_netcdf(const std::string& filename,
                                  const double*      h_dense,
@@ -99,5 +94,5 @@ void write_selected_dense_netcdf(const std::string& filename,
                                  int                num_queries,
                                  int                num_systems,
                                  int                full_N_EQ,
-                                 const std::string& time_origin, // e.g., "2023-01-01T00:00:00Z" passed from the user
-                                 int                compression_level = 4);
+                                 const std::string& time_origin); // e.g., "2023-01-01T00:00:00Z" passed from the user
+                            

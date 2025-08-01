@@ -1,8 +1,8 @@
 #pragma once
 
 #include "config_loader.hpp"        // for ModelConfig
-#include "stream.hpp"               // for Stream<Model204>
-#include "models/model_204.hpp"     // for Model204::N_EQ, etc.
+#include "stream.hpp"               // for Stream<Runoff5>
+#include "models/model_Runoff5.hpp"     // for Runoff5::N_EQ, etc.
 #include <cuda_runtime.h>           // for CUDA runtime API
 #include <string>                   // for std::string
 #include <vector>                   // for std::vector
@@ -115,7 +115,7 @@ struct SolverOutputs {
 SolverInputs prepareSolverInputs(int simYear,                                   // Simulation year
                                  int dayOffset,                                 // Offset in days from the start of the simulation
                                  int daysThisChunk,                             // Number of days in this chunk
-                                 const std::vector<Stream<Model204>>& streams); // Streams to simulate
+                                 const std::vector<Stream<Runoff5>>& streams); // Streams to simulate
 
 /**
  * @brief Launches the solver on the GPU.
@@ -134,7 +134,7 @@ void handleSolverOutputs(const ModelConfig& config,                 // Simulatio
                          int daysThisChunk,                         // Number of days in this chunk
                          const SolverInputs& input,                 // Solver inputs                                                       
                          const SolverOutputs& output,               // Solver outputs
-                         std::vector<Stream<Model204>>& streams);   // Streams to update with final states and dense outputs
+                         std::vector<Stream<Runoff5>>& streams);   // Streams to update with final states and dense outputs
 
 
 /**
@@ -208,6 +208,6 @@ std::string formatDate(int year, int month, int day);
  * @return Parsed std::tm structure.
  */
 void simulateChunk(const ModelConfig& config,
-                   std::vector<Stream<Model204>>& streams,
+                   std::vector<Stream<Runoff5>>& streams,
                    int simYear, int dayOffset, int daysThisChunk);
 

@@ -56,6 +56,7 @@ struct ModelConfig {
     
     // Output
     int print_interval;
+    double query_dt_minutes;   // time step for query output in minutes
     std::vector<int> output_states;
     std::string output_path;
     std::string output_file;

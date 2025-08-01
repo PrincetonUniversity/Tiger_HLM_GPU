@@ -42,3 +42,12 @@ outputs/
 
 # Ignore core dumps
 core.*
+
+# Ignore large datasets and test configs
+data/*.csv
+data/*.nc
+data/*_example_*.csv
+data/*_era5land_*.nc
+data/*_2xlarge.nc
+data/config_Stony_Brook_original.yaml
+

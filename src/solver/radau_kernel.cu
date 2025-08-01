@@ -6,8 +6,7 @@
 #include "radau_kernel.cuh"     // declaration of radau_kernel_multi
 #include "radau_step_dense.cuh"       // radau_step() and radau_dense()
 #include "event_detector.cuh"   // reuse norm_inf, norm_inf_diff if needed
-//#include "models/active_model.hpp"   // defines Model204 and extern __constant__ devParams
-#include "models/model_204.hpp" // brings in Model204
+#include "models/model_Runoff5.hpp" // brings in Runoff5
 #include "I_O/forcing_data.h"
 
 // ---------- DEBUG BOUNDS MACRO ----------
@@ -30,7 +29,7 @@
 // -----------------------------------------------------------------------------
 // This kernel integrates multiple systems in parallel using the Radau IIA method.
 
-template <class Model204>
+template <class Runoff5>
 __global__ void radau_kernel_multi(
     double* y0_all,
     double* y_final_all,
@@ -40,7 +39,7 @@ __global__ void radau_kernel_multi(
     int     num_queries,
     double  t0,
     double  tf,
-    const typename Model204::SP_TYPE* d_sp,
+    const typename Runoff5::SP_TYPE* d_sp,
     int*    stiff_system_indices,
     int     n_stiff,
     const float*  d_forc_data,  // ★ new
@@ -48,7 +47,7 @@ __global__ void radau_kernel_multi(
 )
     
   {
-    constexpr int N_EQ = Model204::N_EQ;
+    constexpr int N_EQ = Runoff5::N_EQ;
 
 
     // Map thread → index in the stiff list
@@ -109,8 +108,8 @@ __global__ void radau_kernel_multi(
         }
 
         // Take one Radau step (fills y_next and error_norm)
-        Model204::rhs(t, y, k_dummy[0], N_EQ, sys_id, d_sp, Fval_arr, nForc);
-        radau_step<Model204>(t, y, y_next, N_EQ, h, my_rtol, my_atol, &error_norm, k_dummy, sys_id, d_sp, d_forc_data, nForc);
+        Runoff5::rhs(t, y, k_dummy[0], N_EQ, sys_id, d_sp, Fval_arr, nForc);
+        radau_step<Runoff5>(t, y, y_next, N_EQ, h, my_rtol, my_atol, &error_norm, k_dummy, sys_id, d_sp, d_forc_data, nForc);
 
         // Accept or reject based on embedded error
         if (error_norm <= 1.0) {
@@ -121,7 +120,7 @@ __global__ void radau_kernel_multi(
                 if (tq > t) {
                     double theta = (tq - t) / h;
                     double y_dense[N_EQ];
-                    radau_dense<Model204>(y,(double (*)[N_EQ]) k_dummy,N_EQ, h, theta, y_dense);
+                    radau_dense<Runoff5>(y,(double (*)[N_EQ]) k_dummy,N_EQ, h, theta, y_dense);
                     // store the dense output in the global array
                     for (int comp = 0; comp < N_EQ; ++comp) {
                         int idx = sys_id*(N_EQ*num_queries)
@@ -160,12 +159,12 @@ __global__ void radau_kernel_multi(
 }
 
 // ----------------------------------------------------------------------------
-// Explicit instantiation of radau_kernel_multi for Model204
+// Explicit instantiation of radau_kernel_multi for Runoff5
 // ----------------------------------------------------------------------------
-template __global__ void radau_kernel_multi<Model204>(
+template __global__ void radau_kernel_multi<Runoff5>(
     double*, double*, double*, double*,
     int, int, double, double,
-    const typename Model204::SP_TYPE*, 
+    const typename Runoff5::SP_TYPE*, 
     int*,     // stiff_system_indices
     int,       // n_stiff
     const float*, // forcing data

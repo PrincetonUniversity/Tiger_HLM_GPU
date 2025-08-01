@@ -2,8 +2,8 @@
 #pragma once
 
 // Forward‐declaration of the implicit Radau IIA multi‐system kernel
-// for the Model204 system.
-template <class Model204>
+// for the Runoff5 system.
+template <class Runoff5>
 __global__ void radau_kernel_multi(
     double* y0_all,
     double* y_final_all,
@@ -13,7 +13,7 @@ __global__ void radau_kernel_multi(
     int     num_queries,
     double  t0,
     double  tf,
-    const typename Model204::SP_TYPE* d_sp,
+    const typename Runoff5::SP_TYPE* d_sp,
     int*    stiff_system_indices,
     int     n_stiff,
     const float*  d_forc_data,  // forcing data

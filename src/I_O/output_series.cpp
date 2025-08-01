@@ -4,7 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstddef>            // for ptrdiff_t
-#include "models/model_204.hpp"
+#include "models/model_Runoff5.hpp"
 
 
 #define NC_CHECK(call) \
@@ -19,7 +19,7 @@
 
 
 /**
- * @brief Write a dense 3D array to a NetCDF file with optional compression.
+ * @brief Write a dense 3D array to a NetCDF file.
  */
 void write_dense_netcdf(const std::string& filename,
                         const double* h_dense,
@@ -30,8 +30,8 @@ void write_dense_netcdf(const std::string& filename,
                         int num_queries,
                         int num_systems,
                         int N_EQ,
-                        const std::string& time_origin, // e.g., "2023-01-01T00:00:00Z" passed from the user
-                        int compression_level = 4) {
+                        const std::string& time_origin) { // e.g., "2023-01-01T00:00:00Z" passed from the user
+                        
     int ncid, sys_dimid, time_dimid, var_dimid;
     int sys_varid, time_varid, var_varid, dense_varid;
 
@@ -68,11 +68,6 @@ void write_dense_netcdf(const std::string& filename,
     int dims[3] = {sys_dimid, time_dimid, var_dimid};
     NC_CHECK(nc_def_var(ncid, "outputs", NC_DOUBLE, 3, dims, &dense_varid));
 
-    // Set compression if requested
-    if (compression_level > 0) {
-        NC_CHECK(nc_def_var_deflate(ncid, dense_varid, 1, 1, compression_level));
-    }
-
     // End define mode
     NC_CHECK(nc_enddef(ncid));
 
@@ -98,8 +93,7 @@ void write_final_netcdf(const std::string& filename,
                         const uint32_t* linkid_vals, // new: 32-bit unsigned integer
                         const int* state_vals,
                         int num_systems,
-                        int N_EQ,
-                        int compression_level) {
+                        int N_EQ) {
     int ncid, sys_dimid, var_dimid;
     int sys_varid, var_varid, final_varid;
 
@@ -125,10 +119,7 @@ void write_final_netcdf(const std::string& filename,
     int dims[2] = {sys_dimid, var_dimid};
     NC_CHECK(nc_def_var(ncid, "outputs", NC_DOUBLE, 2, dims, &final_varid));
 
-    // Set compression if requested
-    if (compression_level > 0) {
-        NC_CHECK(nc_def_var_deflate(ncid, final_varid, 1, 1, compression_level));
-    }
+   
 
     // End define mode
     NC_CHECK(nc_enddef(ncid));
@@ -155,12 +146,11 @@ void write_runoff_dense_netcdf(const std::string& filename,
                               const uint32_t*    linkid_vals,
                               int                num_queries,
                               int                num_systems,
-                              const std::string& time_origin, // e.g., "2023-01-01T00:00:00Z" passed from the user
-                              int                compression_level = 4)
+                              const std::string& time_origin) // e.g., "2023-01-01T00:00:00Z" passed from the user
 {
     // indices into the last axis
-    constexpr int SURF_IDX  = Model204::STATE_SURF_RUNOFF;
-    constexpr int TOTAL_IDX = Model204::STATE_TOTAL_RUNOFF;
+    constexpr int SURF_IDX  = Runoff5::STATE_SURF_RUNOFF;
+    constexpr int TOTAL_IDX = Runoff5::STATE_TOTAL_RUNOFF;
 
     int ncid, sys_dimid, time_dimid;
     int sys_varid, time_varid, surf_varid, total_varid;
@@ -191,12 +181,6 @@ void write_runoff_dense_netcdf(const std::string& filename,
     NC_CHECK(nc_def_var(ncid, "surface_runoff", NC_DOUBLE, 2, dims2, &surf_varid));
     NC_CHECK(nc_def_var(ncid, "total_runoff",   NC_DOUBLE, 2, dims2, &total_varid));
 
-    // Set compression if requested
-    if (compression_level > 0) {
-        NC_CHECK(nc_def_var_deflate(ncid, surf_varid,  1, 1, compression_level));
-        NC_CHECK(nc_def_var_deflate(ncid, total_varid, 1, 1, compression_level));
-    }
-
     // End define mode
     NC_CHECK(nc_enddef(ncid));
 
@@ -209,7 +193,7 @@ void write_runoff_dense_netcdf(const std::string& filename,
     std::vector<double> total_data(num_systems * num_queries);
     for (int s = 0; s < num_systems; ++s) {
         for (int t = 0; t < num_queries; ++t) {
-            int base = (s * num_queries + t) * Model204::N_EQ;
+            int base = (s * num_queries + t) * Runoff5::N_EQ;
             surf_data[s * num_queries + t]  = h_dense[base + SURF_IDX];
             total_data[s * num_queries + t] = h_dense[base + TOTAL_IDX];
         }
@@ -237,8 +221,7 @@ void write_selected_dense_netcdf(const std::string& filename,
                                  int                num_queries,
                                  int                num_systems,
                                  int                full_N_EQ,
-                                 const std::string& time_origin, // e.g., "2023-01-01T00:00:00Z" passed from the user
-                                 int                compression_level)
+                                 const std::string& time_origin) // e.g., "2023-01-01T00:00:00Z" passed from the user
 {
     int ncid, sys_dimid, time_dimid;
     int sys_varid, time_varid;
@@ -274,12 +257,6 @@ void write_selected_dense_netcdf(const std::string& filename,
                             2,
                             dims2,
                             &varids[i]));
-        if (compression_level > 0) {
-            NC_CHECK(nc_def_var_deflate(ncid,
-                                        varids[i],
-                                        1, 1,
-                                        compression_level));
-        }
     }
 
     // End define mode

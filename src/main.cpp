@@ -1,5 +1,4 @@
-// main_new.cpp
-// simualtion_driver.cpp
+// main.cpp
 // Standard Library Headers
 #include <cstdio>       // for printf, fprintf
 #include <cstdlib>      // for std::exit
@@ -25,17 +24,17 @@
 #include "solver/rk45_api.hpp"     // Host-side RK45 API: setup_gpu_buffers, launch_rk45_kernel, etc.
 #include "rk45_step_dense.cuh"     // Device kernel for one RK45 step + dense output
 #include "radau_step_dense.cuh"    // Device kernel for Radau-IIA step + dense output
-#include "radau_kernel.cuh"        // Radau-only kernel for specific model (e.g. Model204)
+#include "radau_kernel.cuh"        // Radau-only kernel for specific model (e.g. Runoff5)
 #include "small_lu.cuh"            // Small-matrix LU solver used by Radau (for implicit steps)
 #include "event_detector.cuh"      // Event detection (e.g., slope jumps, stiffness) on device
 #include "simulation_driver.hpp"   // Simulation core loop (manages time stepping, control flow)
 
 // Model & Parameters
-#include "models/model_204.hpp"    // Brings in SpatialParams and model-specific logic
+#include "models/model_Runoff5.hpp"           // Brings in SpatialParams and model-specific logic
 #include "models/model_registry.hpp"      // Registers models and parameters
-#include "stream.hpp"              // Stream wrapper for simulation (manages model ID, initial state, etc.)
-#include "config_loader.hpp"       // Loads model configuration settings (e.g., from JSON)
-#include "parameters_loader.hpp"   // Loads parameters (e.g., spatial or physical) from CSV
+#include "stream.hpp"                     // Stream wrapper for simulation (manages model ID, initial state, etc.)
+#include "config_loader.hpp"              // Loads model configuration settings (e.g., from JSON)
+#include "parameters_loader.hpp"          // Loads parameters (e.g., spatial or physical) from CSV
 
 // Forcing & Input/Output
 #include "I_O/forcing_loader.hpp"  // Loads external forcing data from NetCDF and maps it
@@ -45,6 +44,9 @@
 // MPI & Timing Utilities
 #include <mpi.h>                   // MPI for parallel communication
 #include "chrono"                  // Timing utility (possibly custom or wrapper around std::chrono)
+
+// ───────── Global Variables ─────────
+double GLOBAL_QUERY_DT = 60.0;   // default output interval (minutes)
 
 // Bring in RK45 API functions
 using rk45_api::setup_gpu_buffers;   
@@ -129,10 +131,8 @@ void logTimer(const std::string& label, double seconds) {
               << seconds << " s\n";
 }
 
-void logWrite(const std::string& file, int compression) {
+void logWrite(const std::string& file) {
    
-    // Log the file name and compression level
-    // std::cout << "[WRITE] Compression for all outputs: " << compression << "\n";
     std::cout << "[WRITE] " << file << "\n";
 }
 
@@ -263,12 +263,12 @@ std::vector<SpatialParams> receiveSpatialParams() {
 }
 
 
-// ───────── Build vector of Stream<Model204> from SpatialParams ─────────
-std::vector<Stream<Model204>> buildStreams(const std::vector<SpatialParams>& params) {
+// ───────── Build vector of Stream<Runoff5> from SpatialParams ─────────
+std::vector<Stream<Runoff5>> buildStreams(const std::vector<SpatialParams>& params) {
     // Define a common initial state y0 for all streams (9-variable model)
-    std::array<double, Model204::N_EQ> y0_common = {0.01, 0.1, 0.0, 0.0, 0.01, 1, 1, 0, 0};
+    std::array<double, Runoff5::N_EQ> y0_common = {0.01, 0.1, 0.0, 0.0, 0.01, 1, 1, 0, 0};
 
-    std::vector<Stream<Model204>> streams;
+    std::vector<Stream<Runoff5>> streams;
     streams.reserve(params.size());
 
     for (const auto& sp : params) {
@@ -280,7 +280,7 @@ std::vector<Stream<Model204>> buildStreams(const std::vector<SpatialParams>& par
 
 // ───────── Allocate & upload SpatialParams to device ─────────
 void setupGpu(const std::vector<SpatialParams>& spatialParams,
-              const std::vector<Stream<Model204>>& streams) {
+              const std::vector<Stream<Runoff5>>& streams) {
 
     int num_systems = static_cast<int>(streams.size());
 
@@ -306,16 +306,6 @@ void setupGpu(const std::vector<SpatialParams>& spatialParams,
         std::fprintf(stderr, "cudaMemcpy(d_sp) failed: %s\n", cudaGetErrorString(err));
         std::exit(1);
     }
-
-    // Debug: round-trip check for 1st element
-    // SpatialParams check0;
-    // err = cudaMemcpy(&check0, d_sp, sizeof(SpatialParams), cudaMemcpyDeviceToHost);
-    // if (err != cudaSuccess) {
-    //     std::fprintf(stderr, "cudaMemcpy (round-trip) failed: %s\n", cudaGetErrorString(err));
-    // } else {
-    //     std::printf("HOST→DEVICE round-trip: stream=%ld, Hu=%g, infil=%g, perco=%g\n",
-    //                 check0.stream, check0.Hu, check0.infil, check0.perco);
-    // }
 
     // Full compare host→device→host copy
     {
@@ -355,7 +345,7 @@ bool isLeapYear(int year) {
 
 
 // ───────── Loop over a single simulation year ─────────
-void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Model204>>& streams) {
+void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff5>>& streams) {
     // std::cout << "\n[SIM] Starting simulation for year: " << year << "\n";
     // std::cout << "----------------------------------------------------\n";
 
@@ -375,11 +365,6 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Model2
     // Determine bounds within this year
     int start_day = (start_tm.tm_year + 1900 == year) ? computeDayOfYear(start_tm) : 0;
     int end_day   = (end_tm.tm_year + 1900 == year)   ? computeDayOfYear(end_tm)   : (TOTAL_DAYS - 1);
-
-    // std::cout << "[INFO] Simulating year " << year
-    //       << " from day " << start_day
-    //       << " to day " << end_day
-    //       << " (inclusive)\n";
 
     // int DAYS_PER_CHUNK = computeDaysPerChunk(num_systems);
     int DAYS_PER_CHUNK = -1;
@@ -409,21 +394,25 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Model2
     }
 
 
-    // for (int dayOffset = 0; dayOffset < TOTAL_DAYS; dayOffset += DAYS_PER_CHUNK) {
     for (int dayOffset = start_day; dayOffset <= end_day; dayOffset += DAYS_PER_CHUNK) {
-        int daysThisChunk = std::min(DAYS_PER_CHUNK, TOTAL_DAYS - dayOffset);
+        // Ensure we do not simulate beyond the configured end_day
+        int remainingDays = end_day - dayOffset + 1;
+        int daysThisChunk = std::min(DAYS_PER_CHUNK, remainingDays);
+
         simulateChunk(config, streams, year, dayOffset, daysThisChunk);
 
         // Advance date pointer for next chunk
         advanceDate(chunkStartYear, chunkStartMon, chunkStartDay, daysThisChunk);
     }
+
 }
 
 // ───────── Dynamically compute how many days per chunk fit in memory ─────────
 int computeDaysPerChunk(int num_systems) {
     constexpr std::uint64_t MAX_BYTES = 15ULL * 1024 * 1024 * 1024; // 15 GiB limit
-    int N_EQ = Model204::N_EQ;
-    double max_chunk_days = (double(MAX_BYTES) / (8.0 * N_EQ * num_systems) - 1.0) / 24.0;
+    int N_EQ = Runoff5::N_EQ;
+    double max_chunk_days = (double(MAX_BYTES) / (8.0 * N_EQ * num_systems) - 1.0) / 24.0; // double
+    // double max_chunk_days = (double(MAX_BYTES) / (4.0 * N_EQ * num_systems) - 1.0) / 24.0; // double
     int DAYS_PER_CHUNK = std::max(1, int(std::floor(max_chunk_days)));
 
     // std::cout << "[INFO] Auto-selected DAYS_PER_CHUNK = " << DAYS_PER_CHUNK
@@ -435,7 +424,7 @@ int computeDaysPerChunk(int num_systems) {
 
 // ───────── Simulate a chunk of days within a year ─────────
 void simulateChunk(const ModelConfig& config,
-                   std::vector<Stream<Model204>>& streams,
+                   std::vector<Stream<Runoff5>>& streams,
                    int simYear,
                    int dayOffset,
                    int daysThisChunk) {
@@ -528,8 +517,6 @@ void uploadForcingsToGpu(NCForcing& chunk) {
     CUDA_CHECK(cudaMemcpyToSymbol(c_forc_dt, chunk.dt.data(), sizeof(double) * chunk.nForc));
     CUDA_CHECK(cudaMemcpyToSymbol(c_forc_nT, chunk.nT.data(), sizeof(size_t) * chunk.nForc));
 
-    // std::cout << "[INFO] Forcing data uploaded to GPU (size: " << (bytes / (1024.0 * 1024.0)) << " MiB)\n";
-    // logInfo("Forcing uploaded to GPU (" + std::to_string(bytes / (1024.0 * 1024.0)) + " MiB)");
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2) << (bytes / (1024.0 * 1024.0));
     logInfo("Forcing uploaded to GPU (" + oss.str() + " MiB)");
@@ -540,9 +527,9 @@ void uploadForcingsToGpu(NCForcing& chunk) {
 SolverInputs prepareSolverInputs(int simYear,
                                   int dayOffset,
                                   int daysThisChunk,
-                                  const std::vector<Stream<Model204>>& streams) {
+                                  const std::vector<Stream<Runoff5>>& streams) {
     SolverInputs input;
-    int N_EQ = Model204::N_EQ;
+    int N_EQ = Runoff5::N_EQ;
     int num_systems = streams.size();
 
     // Absolute simulation times
@@ -557,13 +544,11 @@ SolverInputs prepareSolverInputs(int simYear,
         }
     }
 
-    // Define hourly query times
-    for (double m = input.t0; m <= input.tf; m += 60.0)
+
+    // Define query times using GLOBAL_QUERY_DT
+    for (double m = input.t0; m <= input.tf; m += GLOBAL_QUERY_DT)
         input.h_query_times.push_back(m);
 
-    // std::cout << "[INFO] Prepared solver inputs: "
-    //           << input.h_query_times.size() << " query times, "
-    //           << num_systems << " systems.\n";
 
     return input;
 }
@@ -573,35 +558,34 @@ SolverInputs prepareSolverInputs(int simYear,
 SolverOutputs launchSolverKernel(const SolverInputs& input) {
     SolverOutputs out;
     int num_queries = input.h_query_times.size();
-    int num_systems = input.h_y0.size() / Model204::N_EQ;
+    int num_systems = input.h_y0.size() / Runoff5::N_EQ;
 
     // Setup buffers
-    std::tie(out.d_y0_all,
-             out.d_y_final_all,
-             out.d_query_times,
-             out.d_dense_all,
-             out.d_stiff,
-             out.num_systems,
-             out.num_queries) =
-        setup_gpu_buffers<Model204>(input.h_y0, input.h_query_times);
+    auto [d_y0_all, d_y_final_all, d_query_times,
+        d_dense_ptr, d_stiff_ptr, sys_count, query_count] =
+        setup_gpu_buffers<Runoff5>(input.h_y0, input.h_query_times);
+
+    // Assign to output struct
+    out.d_y0_all      = d_y0_all;
+    out.d_y_final_all = d_y_final_all;
+    out.d_query_times = d_query_times;
+    out.d_dense_all   = d_dense_ptr;
+    out.d_stiff       = d_stiff_ptr;
+    out.num_systems   = sys_count;
+    out.num_queries   = query_count;
+
 
     CUDA_CHECK(cudaMemset(out.d_dense_all, 0xAB,
-                      num_systems * Model204::N_EQ * num_queries * sizeof(double)));
+                      num_systems * Runoff5::N_EQ * num_queries * sizeof(double)));
 
 
     // Determine launch configuration
     int blockSize = 0, minGridSize = 0;
     cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize,
-                                       rk45_then_radau_multi<Model204>, 0, 0);
+                                       rk45_then_radau_multi<Runoff5>, 0, 0);
 
     int numBlocks = (out.num_systems + blockSize - 1) / blockSize;
 
-    // std::cout << "[LAUNCH] Kernel with blocks=" << numBlocks
-    //           << ", threads/block=" << blockSize << "\n";
-
-    // std::cout << "[GPU] Launching with:"
-    //       << " num_systems=" << out.num_systems
-    //       << " num_queries=" << out.num_queries << "\n";
     logGpu("Launching kernel: blocks=" + std::to_string(numBlocks) +
        ", threads=" + std::to_string(blockSize));
     logGpu("Systems=" + std::to_string(out.num_systems) +
@@ -612,7 +596,7 @@ SolverOutputs launchSolverKernel(const SolverInputs& input) {
     cudaMemcpyFromSymbol(&d_sp, devSpatialParamsPtr, sizeof(d_sp));
 
     // Launch the solver
-    rk45_then_radau_multi<Model204><<<numBlocks, blockSize>>>(
+    rk45_then_radau_multi<Runoff5><<<numBlocks, blockSize>>>(
         out.d_y0_all, out.d_y_final_all,    // Initial and final states
         out.d_query_times, out.d_dense_all, // Query times and dense output
         out.num_systems, out.num_queries,   // Number of systems and queries
@@ -636,13 +620,13 @@ void handleSolverOutputs(const ModelConfig& config,
                          int daysThisChunk,
                          const SolverInputs& input,
                          const SolverOutputs& output,
-                         std::vector<Stream<Model204>>& streams) {
-    const int N_EQ = Model204::N_EQ;
+                         std::vector<Stream<Runoff5>>& streams) {
+    const int N_EQ = Runoff5::N_EQ;
     const int ns   = output.num_systems;
     const int nq   = output.num_queries;
 
     // Retrieve results from device and free buffers
-    auto [h_y_final, h_dense] = retrieve_and_free<Model204>(
+    auto [h_y_final, h_dense] = retrieve_and_free<Runoff5>(
         output.d_y0_all, output.d_y_final_all,
         output.d_query_times, output.d_dense_all,
         output.d_stiff,
@@ -664,11 +648,11 @@ void handleSolverOutputs(const ModelConfig& config,
     std::string sDate = formatDate(Y, M, D);
     advanceDate(Y, M, D, daysThisChunk - 1);
     std::string eDate = formatDate(Y, M, D);
-    std::string prefix = std::to_string(simYear) + "_";
+    // std::string prefix = std::to_string(simYear) + "_";
 
-    std::string final_file    = config.output_path + "/final_"   + prefix + sDate + "_" + eDate + ".nc";
-    std::string dense_file    = config.output_path + "/dense_"   + prefix + sDate + "_" + eDate + ".nc";
-    std::string runoff_file   = config.output_path + "/runoff_"  + prefix + sDate + "_" + eDate + ".nc";
+    std::string final_file    = config.output_path + "/final_"   + sDate + "_" + eDate + ".nc";
+    std::string dense_file    = config.output_path + "/dense_"   + sDate + "_" + eDate + ".nc";
+    std::string runoff_file   = config.output_path + "/runoff_"  + sDate + "_" + eDate + ".nc";
 
     // Prepare metadata arrays
     std::vector<uint32_t> link_ids(ns);
@@ -682,45 +666,23 @@ void handleSolverOutputs(const ModelConfig& config,
     std::string time_origin = std::to_string(simYear) + "-01-01T00:00:00Z";
 
     // Write final state to NetCDF (2D)
-    // std::cout << "[WRITE] final: " << final_file << "\n";
-    // write_final_netcdf(final_file,
-    //                    h_y_final.data(),
-    //                    link_ids.data(),
-    //                    state_ids.data(),
-    //                    ns, N_EQ,
-    //                    config.output_compression_level);
     if (!config.final_output_file.empty()) {
-        // std::cout << "[WRITE] final: " << final_file << "\n";
-        logWrite("final.nc", config.output_compression_level);
-        // std::cout << "[DEBUG] Writing with compression level: " << config.output_compression_level << std::endl;
-
+        logWrite(std::filesystem::path(final_file).filename().string());
         write_final_netcdf(final_file, h_y_final.data(),
                         link_ids.data(), state_ids.data(),
-                        ns, N_EQ, config.output_compression_level);
+                        ns, N_EQ);
     } else {
         std::cout << "[SKIP] final output disabled via config\n";
     }
 
 
     // Write dense time output to NetCDF (3D) 
-    // std::cout << "[WRITE] dense: " << dense_file << "\n";
-    // write_dense_netcdf(dense_file,
-    //                    h_dense.data(),
-    //                    input.h_query_times.data(),
-    //                    link_ids.data(),
-    //                    state_ids.data(),
-    //                    nq, ns, N_EQ,
-    //                    time_origin,
-    //                    config.output_compression_level);
     if (!config.output_file.empty()) {
-        // std::cout << "[WRITE] dense: " << dense_file << "\n";
-        logWrite("dense.nc", config.output_compression_level);
-        // std::cout << "[DEBUG] Writing with compression level: " << config.output_compression_level << std::endl;
+        logWrite(std::filesystem::path(dense_file).filename().string());
         write_dense_netcdf(dense_file, h_dense.data(),
                         input.h_query_times.data(),
                         link_ids.data(), state_ids.data(),
-                        nq, ns, N_EQ, time_origin,
-                        config.output_compression_level);
+                        nq, ns, N_EQ, time_origin);
     } else {
         std::cout << "[SKIP] dense output disabled via config\n";
     }
@@ -728,18 +690,13 @@ void handleSolverOutputs(const ModelConfig& config,
 
     // Write selected runoff states
     if (!config.runoff_output_file.empty()) {
-        std::string runoff_file = config.output_path + "/runoff_"  + prefix + sDate + "_" + eDate + ".nc";
-        // std::cout << "[WRITE] runoff: " << runoff_file << "\n";
-        // logWrite("runoff.nc", config.output_compression_level);
-        logWrite(std::filesystem::path(runoff_file).filename().string(),config.output_compression_level);
-        // std::cout << "[DEBUG] Writing with compression level: " << config.output_compression_level << std::endl;
+        logWrite(std::filesystem::path(runoff_file).filename().string());
         write_runoff_dense_netcdf(runoff_file,
                                 h_dense.data(),
                                 input.h_query_times.data(),
                                 link_ids.data(),
                                 nq, ns,
-                                time_origin,
-                                config.output_compression_level);
+                                time_origin);
     } else {
         std::cout << "[SKIP] runoff output disabled via config\n";
     }
@@ -812,6 +769,13 @@ int main(int argc, char** argv) {
     if (!loadConfiguration(argv[1], config)) {
         return 1;
     }
+    GLOBAL_QUERY_DT = config.query_dt_minutes;   // set from YAML
+    if (GLOBAL_QUERY_DT > 60.0) {
+        std::cout << "[WARN] query_dt in config (" << GLOBAL_QUERY_DT 
+                << " min) exceeds max allowed (60 min). Using 60.\n";
+        GLOBAL_QUERY_DT = 60.0;
+    }
+
 
     // Check if user has enabled MPI via config
     bool usingMPI = config.use_mpi;

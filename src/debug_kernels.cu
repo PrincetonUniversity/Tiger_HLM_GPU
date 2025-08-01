@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>       // for CUDA runtime types (e.g., dim3, cudaMemcpy, etc.)
 
 // Project-specific headers that define:
-#include "models/model_204.hpp"   // for Model204::rhs and Model204::N_EQ
+#include "models/model_204.hpp"   // for Runoff5::rhs and Runoff5::N_EQ
 #include "I_O/forcing_data.h"     // for c_forc_dt, c_forc_nT, d_forc_data, nForc (device-side symbols)
 
 
@@ -223,13 +223,13 @@
 //                sp[sys_id].A_h);
 
 //         // Prepare a trivial y-vector and compute dydt
-//         double y[Model204::N_EQ]   = {1.0, 1.0, 1.0, 1.0, 1.0};
-//         double dydt[Model204::N_EQ];
-//         Model204::rhs(0.0, y, dydt, Model204::N_EQ, sys_id, sp, d_forc_data, nForc);
+//         double y[Runoff5::N_EQ]   = {1.0, 1.0, 1.0, 1.0, 1.0};
+//         double dydt[Runoff5::N_EQ];
+//         Runoff5::rhs(0.0, y, dydt, Runoff5::N_EQ, sys_id, sp, d_forc_data, nForc);
 
 //         // Print the resulting derivatives cleanly
 //         printf("[DebugRHS]   dydt: ");
-//         for (int i = 0; i < Model204::N_EQ; ++i) {
+//         for (int i = 0; i < Runoff5::N_EQ; ++i) {
 //             printf("%g ", dydt[i]);
 //         }
 //         printf("\n[DebugRHS] ====  END RHS debug  ====\n\n");
@@ -291,17 +291,17 @@ __global__ void debugRhsForcings(const SpatialParams* sp_ptr,
         printf("  GPU sees rainfall= %f, temperature= %f\n", rain0, temp0);
 
         // Now fire rhs and print dydt
-        double y[Model204::N_EQ] = {0.01,0.1,0,0,0.01,1,1};   // use your real y0 here
-        double dydt[Model204::N_EQ];
-        Model204::rhs(t, y, dydt,
-                      Model204::N_EQ,
+        double y[Runoff5::N_EQ] = {0.01,0.1,0,0,0.01,1,1};   // use your real y0 here
+        double dydt[Runoff5::N_EQ];
+        Runoff5::rhs(t, y, dydt,
+                      Runoff5::N_EQ,
                       sys,
                       sp_ptr,
                       F,
                       nForc);
 
         printf("  dydt =");
-        for (int i = 0; i < Model204::N_EQ; ++i)
+        for (int i = 0; i < Runoff5::N_EQ; ++i)
             printf(" %g", dydt[i]);
         printf("\n-----------------------------\n");
     }
@@ -314,7 +314,7 @@ __global__ void debugDeviceY0(const double* d_y0_all, int ns) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         printf(">>> GPU initial y[0..6] for sys0 <<<\n");
         // d_y0_all is laid out [ y₀_sys0…y₆_sys0, y₀_sys1… , … ]
-        for (int i = 0; i < Model204::N_EQ; ++i) {
+        for (int i = 0; i < Runoff5::N_EQ; ++i) {
             printf("  y[%d] = %g\n", i, d_y0_all[i]);
         }
         printf("-----------------------------\n");

@@ -2,7 +2,7 @@
 // Future Improvement: add switch to activate debug kernels when compiling with -DDEBUG_KERNELS
 #pragma once
 
-#include "models/model_204.hpp"  // for Model204::N_EQ, rhs
+#include "models/model_204.hpp"  // for Runoff5::N_EQ, rhs
 #include "I_O/forcing_data.h"    // for SpatialParams
 
 // ────────── Forcing pointer and symbol checking ──────────
