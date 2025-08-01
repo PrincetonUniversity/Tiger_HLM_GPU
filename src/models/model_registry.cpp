@@ -1,23 +1,23 @@
 // This file provides the host‐side hookup for copying model parameters into
 // the device‐side symbol `devParams`.  It defines the non‐templated helper
-// and the explicit template specialization for Model204.
+// and the explicit template specialization for Runoff5.
 
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <iostream>
-#include "model_204.hpp"    // Model204 & extern __constant__ devParams
+#include "model_Runoff5.hpp"    // Runoff5 & extern __constant__ devParams
 #include "model_registry.hpp"
 
 using namespace rk45_api;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper that copies a Model204::Parameters struct from host memory
-// into the device‐side constant symbol `devParams` (defined in model_204_global.cu).
+// Helper that copies a Runoff5::Parameters struct from host memory
+// into the device‐side constant symbol `devParams` (defined in model_Runoff5_global.cu).
 // Throws std::runtime_error if cudaMemcpyToSymbol fails.
 // ─────────────────────────────────────────────────────────────────────────────
-void setModelParameters(const Model204::Parameters& p) {
-    std::cout << "Size of Model204::Parameters: "
-              << sizeof(Model204::Parameters) << " bytes\n";
+void setModelParameters(const Runoff5::Parameters& p) {
+    std::cout << "Size of Runoff5::Parameters: "
+              << sizeof(Runoff5::Parameters) << " bytes\n";
 
     // Ensure any previous CUDA calls have completed
     cudaDeviceSynchronize();
@@ -26,7 +26,7 @@ void setModelParameters(const Model204::Parameters& p) {
     cudaError_t err = cudaMemcpyToSymbol(
         &devParams,                              // device constant symbol
         &p,                                     // address of host struct
-        sizeof(Model204::Parameters),           // byte count
+        sizeof(Runoff5::Parameters),           // byte count
         0,                                      // offset
         cudaMemcpyHostToDevice                  // kind
     );
@@ -36,7 +36,7 @@ void setModelParameters(const Model204::Parameters& p) {
             + cudaGetErrorString(err)
         );
     }
-    std::cout << "cudaMemcpyToSymbol succeeded for Model204 devParams.\n";
+    std::cout << "cudaMemcpyToSymbol succeeded for Runoff5 devParams.\n";
 
     // Wait for the copy to finish before returning
     cudaDeviceSynchronize();
@@ -48,15 +48,15 @@ namespace rk45_api {
 // Template specialization forwarding to the above helper.
 // ─────────────────────────────────────────────────────────────────────────────
 template <>
-void setModelParameters<Model204>(const Model204::Parameters& p) {
+void setModelParameters<Runoff5>(const Runoff5::Parameters& p) {
     ::setModelParameters(p);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Explicit instantiation so the specialization is emitted.
 // ─────────────────────────────────────────────────────────────────────────────
-template void setModelParameters<Model204>(
-    const Model204::Parameters& p
+template void setModelParameters<Runoff5>(
+    const Runoff5::Parameters& p
 );
 
 } // namespace rk45_api
