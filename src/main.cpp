@@ -576,14 +576,27 @@ SolverOutputs launchSolverKernel(const SolverInputs& input) {
     int num_systems = input.h_y0.size() / Model204::N_EQ;
 
     // Setup buffers
-    std::tie(out.d_y0_all,
-             out.d_y_final_all,
-             out.d_query_times,
-             out.d_dense_all,
-             out.d_stiff,
-             out.num_systems,
-             out.num_queries) =
+    // std::tie(out.d_y0_all,
+    //          out.d_y_final_all,
+    //          out.d_query_times,
+    //          out.d_dense_all,
+    //          out.d_stiff,
+    //          out.num_systems,
+    //          out.num_queries) =
+    //     setup_gpu_buffers<Model204>(input.h_y0, input.h_query_times);
+    auto [d_y0_all, d_y_final_all, d_query_times,
+        d_dense_ptr, d_stiff_ptr, sys_count, query_count] =
         setup_gpu_buffers<Model204>(input.h_y0, input.h_query_times);
+
+    // Assign to output struct
+    out.d_y0_all      = d_y0_all;
+    out.d_y_final_all = d_y_final_all;
+    out.d_query_times = d_query_times;
+    out.d_dense_all   = d_dense_ptr;
+    out.d_stiff       = d_stiff_ptr;
+    out.num_systems   = sys_count;
+    out.num_queries   = query_count;
+
 
     CUDA_CHECK(cudaMemset(out.d_dense_all, 0xAB,
                       num_systems * Model204::N_EQ * num_queries * sizeof(double)));
