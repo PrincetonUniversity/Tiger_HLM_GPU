@@ -99,44 +99,8 @@ auto setup_gpu_buffers(
         num_systems, num_queries
     );
 }
-
-// ───────── 2) Launch the GPU RK45 solver ─────────
-//   Now passes the stiffness‐flag array into the kernel.
-template<class Model204>
-void launch_rk45_kernel(
-    double* d_y0_all,
-    double* d_y_final_all,
-    double* d_query_times,
-    double* d_dense_all,
-    int*    d_stiff,             // new
-    int     num_systems,
-    int     num_queries,
-    double  t0,
-    double  tf,
-    const typename Model204::SP_TYPE* d_sp
-) {
-    constexpr int THREADS_PER_BLOCK = 128;
-    int numBlocks = (num_systems + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    dim3 blocks(numBlocks);
-    dim3 threadsPerBlock(THREADS_PER_BLOCK);
-
-    // Launch the combined RK45+stiffness‐flagging kernel:
-    (rk45_then_radau_multi<Model204>)
-        <<< blocks, threadsPerBlock >>>
-        ( d_y0_all, d_y_final_all,
-          d_query_times, d_dense_all,
-          num_systems, num_queries,
-          t0, tf,
-          d_sp,
-          d_stiff                  // ← pass in the flag array
-        );
-
-    // Sync + check
-    cudaError_t err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) throw std::runtime_error("Kernel execution failed");
-    err = cudaGetLastError();
-    if (err != cudaSuccess) throw std::runtime_error("Kernel launch failed!!!!!!");
-}
+// ───────── 2) Launch the RK45 kernel ─────────
+// Added to the main.cpp for launching the kernel
 
 // // ───────── 3) Copy back results & free GPU memory ─────────
 // //   We now also copy back the stiffness flags, gather which
@@ -283,7 +247,7 @@ std::pair<FinalType, DenseType> retrieve_and_free(
     cudaMemcpy(h_stiff.data(),        d_stiff,        bytes_stiff, cudaMemcpyDeviceToHost);
 
     // ——————————————————————————————————————————————————————————
-    // **NEW**: copy out the *true* y0 before we free it
+    // Copy out the true y0 before we free it
     std::vector<double> h_y0_all(num_systems * N_EQ);
     cudaMemcpy(h_y0_all.data(), d_y0_all, bytes_y0, cudaMemcpyDeviceToHost);
     // ——————————————————————————————————————————————————————————
@@ -291,6 +255,10 @@ std::pair<FinalType, DenseType> retrieve_and_free(
     // Free the stiffness‐flag array
     cudaFree(d_stiff);
 
+    // —————— To use RADAU kernels ————————————————————————————————————————————
+    // Note: We are not using the RADAU kernels here, since during runoff process
+    //       the systems are not stiff and we are working with very high tolerance here. 
+    //       We will use them only in the next step - routing.
     // 3b) figure out which systems are stiff…
     // 3c) launch radau on them…
 
@@ -301,18 +269,20 @@ std::pair<FinalType, DenseType> retrieve_and_free(
     cudaFree(d_dense_all);
 
     // 3e) Reorder raw dense → [sys][q][comp]
-    DenseType h_dense_all(num_systems * N_EQ * num_queries);
-    for (int s = 0; s < num_systems; ++s) {
-      for (int q = 0; q < num_queries; ++q) {
-        for (int c = 0; c < N_EQ; ++c) {
-          int src = s * (N_EQ * num_queries)
-                  + c * (num_queries)
-                  + q;
-          int dst = (s * num_queries + q) * N_EQ + c;
-          h_dense_all[dst] = h_dense_raw[src];
-        }
-      }
-    }
+    // DenseType h_dense_all(num_systems * N_EQ * num_queries);
+    // for (int s = 0; s < num_systems; ++s) {
+    //   for (int q = 0; q < num_queries; ++q) {
+    //     for (int c = 0; c < N_EQ; ++c) {
+    //       int src = s * (N_EQ * num_queries)
+    //               + c * (num_queries)
+    //               + q;
+    //       int dst = (s * num_queries + q) * N_EQ + c;
+    //       h_dense_all[dst] = h_dense_raw[src];
+    //     }
+    //   }
+    // }
+    // No reordering needed, just move the data
+    DenseType h_dense_all = std::move(h_dense_raw);
 
     // ——————————————————————————————————————————————————————————
     // Overwrite the q=0 slice in h_dense_all with the true y0
@@ -328,48 +298,5 @@ std::pair<FinalType, DenseType> retrieve_and_free(
              std::move(h_dense_all) };
 }
 
-
-// ───────── run_rk45<Model204> composes everything ─────────
-template <class Model204>
-std::pair<FinalType, DenseType>
-run_rk45(
-    const std::vector<double>& h_y0,
-    double t0,
-    double tf,
-    const std::vector<double>& h_query_times,
-    typename Model204::SP_TYPE* d_sp,
-    const float*               d_forc_data, 
-    int                         nForc      
-) {
-    // 1) alloc & copy
-    auto [ d_y0_all,
-           d_y_final_all,
-           d_query_times,
-           d_dense_all,
-           d_stiff,            
-           ns, nq ]
-      = setup_gpu_buffers<Model204>(h_y0, h_query_times);
-
-    // 2) launch RK45 + stiffness‐flagging
-    launch_rk45_kernel<Model204>(
-      d_y0_all, d_y_final_all,
-      d_query_times, d_dense_all,
-      d_stiff,              
-      ns, nq, t0, tf,
-      d_sp, // device‐constant pointer to spatial params
-      d_forc_data, // forcing data pointer
-      nForc         // number of forcings
-    );
-
-    // 3) retrieve, launch Radau on stiff systems, reorder, free
-    return retrieve_and_free<Model204>(
-      d_y0_all, d_y_final_all,
-      d_query_times, d_dense_all,
-      d_stiff,             
-      ns, nq,
-      t0, tf,
-      d_sp, d_forc_data, nForc
-    );
-}
 
 } // namespace rk45_api
