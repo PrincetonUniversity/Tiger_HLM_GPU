@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Makefile for Tiger HLM Runoff (Model204 only) - Versioned Build
+# Makefile for Tiger HLM Runoff (Runoff5 only) - Versioned Build
 # ─────────────────────────────────────────────────────────────────────────────
 
 NVCC ?= $(shell which nvcc 2>/dev/null)
@@ -32,13 +32,13 @@ NVCCFLAGS := -std=c++17 -rdc=true \
   -gencode arch=compute_90,code=sm_90 \
   -Xcudafe --diag_suppress=177 \
   -Xcudafe --diag_suppress=20091 \
-  $(DEVICE_INCLUDES) -DUSE_MODEL_204 -Wno-deprecated-gpu-targets
+  $(DEVICE_INCLUDES) -DUSE_MODEL_5 -Wno-deprecated-gpu-targets
 
 # Embed version and date into the binary
 NVCCFLAGS += -DPROJECT_VERSION="\"Tiger-HLM Runoff version $(VERSION)\"" \
              -DBUILD_DATE="\"$(shell date)\""
 
-HOSTFLAGS := -std=c++17 $(HOST_INCLUDES) -DUSE_MODEL_204 \
+HOSTFLAGS := -std=c++17 $(HOST_INCLUDES) -DUSE_MODEL_5 \
              -L${NETCDF_PATH}/lib64 -lnetcdf
 
 ifeq ($(DEBUG),1)
@@ -71,7 +71,7 @@ SRC_HOST_CPP := $(MODELS_DIR)/model_registry.cpp $(IO_DIR)/config_loader.cpp
 SRC_IO_CPP   := $(IO_DIR)/parameters_loader.cpp $(IO_DIR)/forcing_loader.cpp $(OUT_CPP)
 SRC_UTIL_CPP := $(MODELS_DIR)/ETmethods.cpp $(MODELS_DIR)/soiltemp.cpp
 SRC_CU       := $(SOLVER_DIR)/rk45_kernel.cu $(SOLVER_DIR)/radau_kernel.cu \
-                $(MODELS_DIR)/model_204_global.cu $(IO_DIR)/forcing_data.cu
+                $(MODELS_DIR)/model_Runoff5_global.cu $(IO_DIR)/forcing_data.cu
 
 # ─────────────────────────────────────────
 # Object files
@@ -80,7 +80,7 @@ OBJ_HOST     := $(OBJ_DIR)/models/model_registry.o $(OBJ_DIR)/I_O/config_loader.
 OBJ_IO       := $(patsubst $(IO_DIR)/%.cpp,$(OBJ_DIR)/I_O/%.o,$(SRC_IO_CPP))
 OBJ_UTIL     := $(patsubst $(MODELS_DIR)/%.cpp,$(OBJ_DIR)/models/%.o,$(SRC_UTIL_CPP))
 OBJ_DEVICE   := $(patsubst $(SOLVER_DIR)/%.cu,$(OBJ_DIR)/solver/%.o,$(filter $(SOLVER_DIR)/%.cu,$(SRC_CU))) \
-                $(OBJ_DIR)/models/model_204_global.o $(OBJ_DIR)/I_O/forcing_data.o $(OBJ_MAIN)
+                $(OBJ_DIR)/models/model_Runoff5_global.o $(OBJ_DIR)/I_O/forcing_data.o $(OBJ_MAIN)
 DEVICE_LINK  := $(OBJ_DIR)/device_link.o
 
 # ─────────────────────────────────────────
