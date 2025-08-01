@@ -39,9 +39,9 @@ __global__ void rk45_then_radau_multi(
     double  t0,
     double  tf,
     const typename Model204::SP_TYPE* d_sp,
-    int*    d_stiff,       // new: flag array
-    const float*  d_forc_data,  // ★ new
-    int           nForc       // ★ new: number of forcings
+    int*    d_stiff,       // flag array
+    const float*  d_forc_data,  // [nForc × num_systems × nSamples]
+    int           nForc       // number of forcings
 ) {
 
 
@@ -130,10 +130,7 @@ __global__ void rk45_then_radau_multi(
                 base += c_forc_nT[k] * size_t(num_systems);
             }
             Fval_arr[j] = d_forc_data[ base + sampleIdx * size_t(num_systems) + sys ];
-
-
-            //size_t base = size_t(j) * (nSamples * num_systems);
-            //Fval_arr[j] = d_forc_data[ base + sampleIdx * num_systems + sys ];
+        
         }
 
         // int sys = blockIdx.x*blockDim.x + threadIdx.x;
@@ -181,8 +178,15 @@ __global__ void rk45_then_radau_multi(
                         DBG_ASSERT(sys < num_systems, "Invalid system index sys=%d", sys);
                         DBG_ASSERT(next_q < num_queries, "Invalid query index next_q=%d", next_q);
                         DBG_ASSERT(dense_all != nullptr, "dense_all is null!");
-                        int idx = sys * (N_EQ * num_queries) + c * num_queries + next_q;
-                        DBG_ASSERT(idx < (num_systems * N_EQ * num_queries), "OOB index %d", idx);
+                        // int idx = sys * (N_EQ * num_queries) + c * num_queries + next_q;
+                        // DBG_ASSERT(idx < (num_systems * N_EQ * num_queries), "OOB index %d", idx);
+
+                        // Store the dense output in the global array
+                        long long idx = ((long long)sys * num_queries + next_q) * N_EQ + c;
+                        DBG_ASSERT(idx < (long long)num_systems * num_queries * N_EQ, 
+                                "OOB idx=%lld sys=%d q=%d c=%d", idx, sys, next_q, c);
+                        dense_all[idx] = yd[c];
+
 
 
                         dense_all[sys*(N_EQ*num_queries) + c*num_queries + next_q] = yd[c];
@@ -220,10 +224,10 @@ __global__ void rk45_then_radau_multi(
     }
 }
 
-// ----------------------------------------------------------------------------
+// ────────────────────────────────────────────────────────────────────────────
 // Explicit instantiation for Model204
-// ----------------------------------------------------------------------------
-// new — all 12 params in order:
+// ────────────────────────────────────────────────────────────────────────────
+// All 12 params in order:
 template __global__ void rk45_then_radau_multi<Model204>(
     double*,          // y0_all
     double*,          // y_final_all
