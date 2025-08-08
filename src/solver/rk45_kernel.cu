@@ -7,8 +7,8 @@
 #include "event_detector.cuh"
 #include "small_lu.cuh"
 #include "radau_step_dense.cuh"
-#include "models/model_Runoff5.hpp"
-#include "I_O/forcing_data.h"
+#include "../models/model_Runoff5.hpp"
+#include "../I_O/forcing_data.h"
 
 
 // ───────────DEBUG BOUNDS MACRO ──────────────────────────────────────────────
@@ -39,31 +39,24 @@ __global__ void rk45_then_radau_multi(
     double  t0,
     double  tf,
     const typename Runoff5::SP_TYPE* d_sp,
-    int*    d_stiff,       // flag array
-    const float*  d_forc_data,  // [nForc × num_systems × nSamples]
-    int           nForc       // number of forcings
+    int*    d_stiff       // flag array
 ) {
 
+    
+    // re-declare the symbols you need:
+    extern __device__   float*   d_forc_data;
+    extern __constant__ double   c_forc_dt[];
+    extern __constant__ size_t   c_forc_nT[];
+    extern __constant__ int      nForc;
 
     constexpr int N_EQ = Runoff5::N_EQ;
     int sys = blockIdx.x*blockDim.x + threadIdx.x;
     if (sys >= num_systems) return;
 
-    // only one thread prints
-    // if (blockIdx.x == 0 && threadIdx.x == 0) {
-    //     printf("[RK45] got d_forc_data=%p  nForc=%d\n"
-    //            "       dt[0]=%g, dt[1]=%g  nT[0]=%llu, nT[1]=%llu\n",
-    //            (void*)d_forc_data, nForc,
-    //            c_forc_dt[0], c_forc_dt[1],
-    //            (unsigned long long)c_forc_nT[0],
-    //            (unsigned long long)c_forc_nT[1]);
-    // }
-
     // solver parameters
     double rtol = devParams.rtol;
     double atol = devParams.atol;
-    // double h    = devParams.initialStep;
-    // double t    = t0;
+
 
 
     // ─── State & forcing buffer ───
@@ -82,70 +75,38 @@ __global__ void rk45_then_radau_multi(
         // ─── gather forcings *at current t* ───
         // pick the value corresponding to the current time t for each forcing j
         float Fval_arr[MAX_FORCINGS];
-        // for (int j = 0; j < nForc; ++j) {
-        //     // compute where we are in the forcing time series as a real number
-        //     // double sampleIdxReal = t / c_forc_dt[j];
-
-        //     // convert this forcing’s dt (hours) → dt_min (minutes)
-        //     double dt_min        = c_forc_dt[j] * 60.0;
-        //     double sampleIdxReal = t / dt_min;
-
-        //     // how many total time steps we loaded for this forcing
-        //     size_t nSamples = c_forc_nT[j];
-        //     // convert to an index between 0 and nSamples-1:
-        //     // - if sampleIdxReal is below zero, use 0
-        //     // - if it's beyond the last step, use the last index
-        //     // - otherwise, drop the decimal part to get a whole number
-        //     size_t sampleIdx = (sampleIdxReal < 0.0 
-        //                         ? 0 
-        //                         : sampleIdxReal >= nSamples 
-        //                             ? nSamples - 1 
-        //                             : size_t(sampleIdxReal));
-        //     // calculate where forcing j’s block starts in the big array
-        //     size_t base = size_t(j) * (nSamples * num_systems);
-        //     // pick the value for this particular stream (thread) at time sampleIdx
-        //     Fval_arr[j] = d_forc_data[ base + sampleIdx * num_systems + sys ];
-        // }
-
-        // ─── gather forcings at current t ───
+        
         for (int j = 0; j < nForc; ++j) {
-            // OLD (wrong): sampleIdxReal in hours
-            // double sampleIdxReal = t / c_forc_dt[j];
 
-            // NEW: convert dt from hours to minutes
-            double dt_min        = c_forc_dt[j] * 60.0;
-            // double sampleIdxReal = t / dt_min; // changed to t - t0 so that we can loop over the whole time range for a specific time chunk
-            double sampleIdxReal = ( t - t0 ) / dt_min;
-
-            size_t nSamples = c_forc_nT[j];
-            size_t sampleIdx = (sampleIdxReal < 0.0
+            // compute which sample we need for this forcing
+            double dt_min        = c_forc_dt[j] * 60.0;           // minutes
+            double sampleIdxReal = (t - t0) / dt_min;            // fractional step
+            size_t nSamples      = c_forc_nT[j];
+            size_t sampleIdx     = sampleIdxReal < 0.0
                                 ? 0
                                 : sampleIdxReal >= nSamples
                                     ? nSamples - 1
-                                    : size_t(sampleIdxReal));
+                                    : size_t(sampleIdxReal);
 
-            // compute the correct block start by summing the previous blocks
+            // build prefix‐sum of all prior blocks to get the true start offset
             size_t base = 0;
-            for (int k = 0; k < j; ++k) {
-                base += c_forc_nT[k] * size_t(num_systems);
+            for (int kk = 0; kk < j; ++kk) {
+                base += c_forc_nT[kk] * size_t(num_systems);
             }
-            Fval_arr[j] = d_forc_data[ base + sampleIdx * size_t(num_systems) + sys ];
-        
+
+            // final flattened index into d_forc_data
+            size_t idx = base + sampleIdx * size_t(num_systems) + sys;
+            Fval_arr[j] = d_forc_data[idx];
         }
 
-        // int sys = blockIdx.x*blockDim.x + threadIdx.x;
-        // if (sys == 0 && threadIdx.x == 0) {
-        //     printf("[KERNEL]  y0_all[0..6] ="
-        //         " %g %g %g %g %g %g %g\n",
-        //         y0_all[0], y0_all[1], y0_all[2],
-        //         y0_all[3], y0_all[4], y0_all[5],
-        //         y0_all[6]);
-        // }
         
 
         // pass forcings into RHS
         Runoff5::rhs(t, y, k45[0], N_EQ, sys, d_sp, Fval_arr, nForc);
-        //Runoff5::rhs(t, y, k45[0], N_EQ, sys, d_sp);
+        
+
+
+
         rk45_step<Runoff5>(t, y, y_next, N_EQ, h, rtol, atol, &err, k45, sys, d_sp, Fval_arr, nForc);
 
     // int next_q = 0, reject_count = 0;
@@ -178,18 +139,12 @@ __global__ void rk45_then_radau_multi(
                         DBG_ASSERT(sys < num_systems, "Invalid system index sys=%d", sys);
                         DBG_ASSERT(next_q < num_queries, "Invalid query index next_q=%d", next_q);
                         DBG_ASSERT(dense_all != nullptr, "dense_all is null!");
-                        // int idx = sys * (N_EQ * num_queries) + c * num_queries + next_q;
-                        // DBG_ASSERT(idx < (num_systems * N_EQ * num_queries), "OOB index %d", idx);
-
                         // Store the dense output in the global array
                         long long idx = ((long long)sys * num_queries + next_q) * N_EQ + c;
                         DBG_ASSERT(idx < (long long)num_systems * num_queries * N_EQ, 
                                 "OOB idx=%lld sys=%d q=%d c=%d", idx, sys, next_q, c);
                         dense_all[idx] = yd[c];
 
-
-
-                        dense_all[sys*(N_EQ*num_queries) + c*num_queries + next_q] = yd[c];
                      }
                 }
 
@@ -238,9 +193,7 @@ template __global__ void rk45_then_radau_multi<Runoff5>(
     double,           // t0
     double,           // tf
     const Runoff5::SP_TYPE*, // d_sp
-    int*,             // d_stiff
-    const float*,     // d_forc_data
-    int               // nForc
+    int*             // d_stiff
 );
 
 
