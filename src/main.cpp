@@ -20,30 +20,33 @@
 #include <cuda_runtime.h>           // CUDA runtime API
 
 // Project Core Headers
-#include "rk45.h"                  // Runge-Kutta 4/5 core solver interface (host side)
+#include "solver/rk45.h"                  // Runge-Kutta 4/5 core solver interface (host side)
 #include "solver/rk45_api.hpp"     // Host-side RK45 API: setup_gpu_buffers, launch_rk45_kernel, etc.
-#include "rk45_step_dense.cuh"     // Device kernel for one RK45 step + dense output
-#include "radau_step_dense.cuh"    // Device kernel for Radau-IIA step + dense output
-#include "radau_kernel.cuh"        // Radau-only kernel for specific model (e.g. Runoff5)
-#include "small_lu.cuh"            // Small-matrix LU solver used by Radau (for implicit steps)
-#include "event_detector.cuh"      // Event detection (e.g., slope jumps, stiffness) on device
+#include "solver/rk45_step_dense.cuh"     // Device kernel for one RK45 step + dense output
+#include "solver/radau_step_dense.cuh"    // Device kernel for Radau-IIA step + dense output
+#include "solver/radau_kernel.cuh"        // Radau-only kernel for specific model (e.g. Runoff5)
+#include "solver/small_lu.cuh"            // Small-matrix LU solver used by Radau (for implicit steps)
+#include "solver/event_detector.cuh"      // Event detection (e.g., slope jumps, stiffness) on device
 #include "simulation_driver.hpp"   // Simulation core loop (manages time stepping, control flow)
 
 // Model & Parameters
 #include "models/model_Runoff5.hpp"           // Brings in SpatialParams and model-specific logic
 #include "models/model_registry.hpp"      // Registers models and parameters
 #include "stream.hpp"                     // Stream wrapper for simulation (manages model ID, initial state, etc.)
-#include "config_loader.hpp"              // Loads model configuration settings (e.g., from JSON)
-#include "parameters_loader.hpp"          // Loads parameters (e.g., spatial or physical) from CSV
+#include "I_O/config_loader.hpp"              // Loads model configuration settings (e.g., from JSON)
+#include "I_O/parameters_loader.hpp"          // Loads parameters (e.g., spatial or physical) from CSV
 
 // Forcing & Input/Output
 #include "I_O/forcing_loader.hpp"  // Loads external forcing data from NetCDF and maps it
 #include "I_O/forcing_data.h"      // Provides forcing data structure
-#include "output_series.hpp"       // Serial output to NetCDF format
+#include "I_O/output_series.hpp"       // Serial output to NetCDF format
 
 // MPI & Timing Utilities
 #include <mpi.h>                   // MPI for parallel communication
 #include "chrono"                  // Timing utility (possibly custom or wrapper around std::chrono)
+
+// tell the compiler/linker about our new 2-arg solver-launch function
+SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc);
 
 // ───────── Global Variables ─────────
 double GLOBAL_QUERY_DT = 60.0;   // default output interval (minutes)
@@ -74,6 +77,57 @@ int computeDayOfYear(const std::tm& t) {
     return static_cast<int>((target - start) / 86400);
 }
 
+__global__ void checkForcingsOnDeviceSafe(const float* d_forc,
+                                          int nForc, int days, int systems,
+                                          size_t totalCount)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+
+    printf(">>> [GPU] SAFE FORCING CHECK <<<\n");
+    size_t expected = 0;
+    for (int k = 0; k < nForc; ++k) expected += c_forc_nT[k] * (size_t)systems;
+    printf("    nForc=%d, days=%d, systems=%d, expected_total=%llu (allocated=%llu)\n",
+        nForc, days, systems,
+        (unsigned long long)expected, (unsigned long long)totalCount);
+
+
+    int maxF = min(nForc, 2);
+    int maxD = min(days, 3);
+    int maxS = min(systems, 1);
+
+    for (int f = 0; f < maxF; ++f) {
+        printf("  Forcing[%d]:\n", f);
+        for (int d = 0; d < maxD; ++d) {
+            for (int s = 0; s < maxS; ++s) {
+                // Compute linear index
+                // Formula:
+                // idx = ( Σ_{k=0}^{f-1} c_forc_nT[k] * systems )   // skip all previous forcings
+                //     + (d * systems)                              // skip previous timesteps in this forcing
+                //     + s;                                         // offset for the current system
+                size_t base = 0;
+                // Step 1: accumulate the size of all forcings before 'f'
+                // Each previous forcing k has c_forc_nT[k] timesteps, and each timestep
+                // stores 'systems' values (one per system).
+                for (int k = 0; k < f; ++k) {
+                    base += c_forc_nT[k] * (size_t)systems;
+                }
+                // Step 2: add the offset for the current timestep d within forcing f.
+                // Multiply by 'systems' because each timestep holds one value per system.
+                // Step 3: add the offset + (size_t)s for the current system s within this timestep of this forcing.
+                size_t idx = base + (size_t)d * (size_t)systems + (size_t)s;
+                // Safety check: ensure index is within allocated array bounds 
+                if (idx >= totalCount) {
+                    printf("    [OOB] f=%d d=%d s=%d idx=%llu\n",
+                           f, d, s, (unsigned long long)idx);
+                    continue;
+                }
+                float val = d_forc[idx]; 
+                printf("    f=%d d=%d s=%d → %f\n", f, d, s, val);
+            }
+        }
+    }
+    printf("---------------------------------\n");
+}
 
 // Helper macros for CUDA error checking
 #define CUDA_CHECK(call)                                                      \
@@ -346,9 +400,7 @@ bool isLeapYear(int year) {
 
 // ───────── Loop over a single simulation year ─────────
 void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff5>>& streams) {
-    // std::cout << "\n[SIM] Starting simulation for year: " << year << "\n";
-    // std::cout << "----------------------------------------------------\n";
-
+    
     // Initialize chunk start date
     int chunkStartYear = year, chunkStartMon = 1, chunkStartDay = 1;
     int TOTAL_DAYS = isLeapYear(year) ? 366 : 365; // determine if leap year
@@ -412,12 +464,7 @@ int computeDaysPerChunk(int num_systems) {
     constexpr std::uint64_t MAX_BYTES = 15ULL * 1024 * 1024 * 1024; // 15 GiB limit
     int N_EQ = Runoff5::N_EQ;
     double max_chunk_days = (double(MAX_BYTES) / (8.0 * N_EQ * num_systems) - 1.0) / 24.0; // double
-    // double max_chunk_days = (double(MAX_BYTES) / (4.0 * N_EQ * num_systems) - 1.0) / 24.0; // double
     int DAYS_PER_CHUNK = std::max(1, int(std::floor(max_chunk_days)));
-
-    // std::cout << "[INFO] Auto-selected DAYS_PER_CHUNK = " << DAYS_PER_CHUNK
-    //           << " (based on memory limit)\n";
-              // << num_systems << " systems)\n";
 
     return DAYS_PER_CHUNK;
 }
@@ -443,20 +490,61 @@ void simulateChunk(const ModelConfig& config,
 
 
     // ───────── Load forcing data for this chunk ─────────
-    NCForcing forcingChunk = loadForcingData(config, simYear, dayOffset, daysThisChunk, num_systems);
+    NCForcing forcingChunk = loadForcingData(config, simYear, dayOffset, daysThisChunk, num_systems, streams);
 
+    // ───── DEBUG: Print SpatialParams for system s=0 ─────
+    // if (!streams.empty()) {
+    //     const SpatialParams& sp = streams[0].sp;
+    //     std::cout << "[DEBUG SPATIAL] System s=0 SpatialParams:\n"
+    //             << "  streamID=" << sp.stream
+    //             << " A_h=" << sp.A_h
+    //             << " slope=" << sp.slope
+    //             << " n_mann=" << sp.n_mann
+    //             // Add more fields from SpatialParams as needed
+    //             << std::endl;
+    // }
+    
     // ───────── Copy forcings to device ─────────
     uploadForcingsToGpu(forcingChunk);
+
+    // SANITY: print first 3 precipitation & t2m values for system 0
+    std::cout << "[SANITY-FORC] first 3 pr/t2m at sys=0:\n";
+    for (int f = 0; f < forcingChunk.nForc; ++f) {
+    std::cout << " forcing " << f << " dt=" << forcingChunk.dt[f]
+                << " steps=" << forcingChunk.nT[f] << ": ";
+    for (int t = 0; t < std::min<size_t>(3, forcingChunk.nT[f]); ++t) {
+        // h_data is interleaved [f][t][system]
+        size_t base = 0;
+        for (int k = 0; k < f; ++k) base += forcingChunk.nT[k] * forcingChunk.systems;
+        size_t idx = base + t * forcingChunk.systems + 0;
+
+        std::cout << forcingChunk.h_data[idx]
+                << (t+1 < std::min<size_t>(3,forcingChunk.nT[f]) ? ", " : "");
+    }
+    std::cout << "\n";
+    }
+
+
+    // ───────── Run GPU DEBUG forcing check ─────────
+    // std::cout << "[DEBUG] Running safe GPU forcing check...\n";
+    // float* d_forc_ptr = nullptr;
+    // CUDA_CHECK(cudaMemcpyFromSymbol(&d_forc_ptr, d_forc_data, sizeof(float*)));
+    // checkForcingsOnDeviceSafe<<<1,1>>>(d_forc_ptr,
+    //                                 forcingChunk.nForc,
+    //                                 forcingChunk.days,
+    //                                 forcingChunk.systems,
+    //                                 forcingChunk.h_data.size());
+    // CUDA_CHECK(cudaDeviceSynchronize());
+
 
     // ───────── Prepare solver input arrays ─────────
     SolverInputs solverInputs = prepareSolverInputs(simYear, dayOffset, daysThisChunk, streams);
 
     // ───────── Launch ODE solver on GPU ─────────
     TimePoint t_solver_start = Clock::now();
-    SolverOutputs solverOutputs = launchSolverKernel(solverInputs);
+    std::cout << "[HOST DEBUG] Launching kernel with nForc=" << forcingChunk.nForc << std::endl;
+    SolverOutputs solverOutputs = launchSolverKernel(solverInputs, forcingChunk.nForc);
     TimePoint t_solver_end = Clock::now();
-    // std::cout << "[TIMER] Solver took " 
-    //         << elapsedSeconds(t_solver_start, t_solver_end) << " seconds\n";
     logTimer("Solver runtime", elapsedSeconds(t_solver_start, t_solver_end));
 
 
@@ -468,13 +556,13 @@ void simulateChunk(const ModelConfig& config,
             << elapsedSeconds(t_output_start, t_output_end) << " seconds\n";
 }
 
-// ───────── Load forcing data chunk (e.g., precipitation, temperature) for this period
+// ───────── Load forcing data from NetCDF and map to streams ─────────
 NCForcing loadForcingData(const ModelConfig& config,
                           int simYear,
                           int dayOffset,
                           int daysThisChunk,
-                          int num_systems) {
-    // Loop over configured forcings (e.g., pr, t2m)
+                          int num_systems,
+                          const std::vector<Stream<Runoff5>>& streams) {
     std::vector<ForcingEntry> forcings;
     for (const auto& f : config.forcing_variables) {
         double dt_hr = (f.time_resolution == "1h") ? 1.0 :
@@ -489,20 +577,38 @@ NCForcing loadForcingData(const ModelConfig& config,
         forcings.push_back({ config.forcings_path + file, f.var_name, dt_hr });
     }
 
-    // Build NCForcing struct to return (user-defined)
     NCForcing chunk;
     chunk.entries = std::move(forcings);
     chunk.days    = daysThisChunk;
     chunk.offset  = dayOffset;
     chunk.systems = num_systems;
 
+    // Initialize mapper
+    std::string mapperFile = config.forcing_mappings_path + "/" + config.forcing_mappings[0].file;
+    chunk.mapper = LookupMapper(mapperFile);
+
+    if (!chunk.mapper.load()) {
+        throw std::runtime_error("Failed to load stream → lat/lon mapping");
+    }
+
+    // Fill system IDs
+    chunk.systemIds.resize(num_systems);
+    for (size_t i = 0; i < num_systems; ++i) {
+        chunk.systemIds[i] = streams[i].sp.stream; // assuming SpatialParams.stream is stream ID
+    }
+
     return chunk;
 }
+
 
 // ───────── Upload forcing data to device and copy pointer + metadata to device symbols
 void uploadForcingsToGpu(NCForcing& chunk) {
     // Load the actual values from NetCDF using the paths in NCForcing
     chunk.loadData();  // Assume this allocates & populates: chunk.h_data
+    if (chunk.h_data.empty()) {
+        throw std::runtime_error("No forcing data loaded for this chunk");
+    }
+
 
     float* d_ptr = nullptr;
     size_t bytes = sizeof(float) * chunk.h_data.size();
@@ -511,7 +617,7 @@ void uploadForcingsToGpu(NCForcing& chunk) {
     CUDA_CHECK(cudaMalloc(&d_ptr, bytes));
     CUDA_CHECK(cudaMemcpy(d_ptr, chunk.h_data.data(), bytes, cudaMemcpyHostToDevice));
 
-    // Copy metadata to device symbols
+    // Copy the new chunk’s pointer + metadata into device globals:
     CUDA_CHECK(cudaMemcpyToSymbol(d_forc_data, &d_ptr, sizeof(float*)));
     CUDA_CHECK(cudaMemcpyToSymbol(nForc, &chunk.nForc, sizeof(int)));
     CUDA_CHECK(cudaMemcpyToSymbol(c_forc_dt, chunk.dt.data(), sizeof(double) * chunk.nForc));
@@ -520,6 +626,20 @@ void uploadForcingsToGpu(NCForcing& chunk) {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2) << (bytes / (1024.0 * 1024.0));
     logInfo("Forcing uploaded to GPU (" + oss.str() + " MiB)");
+
+    // // ───────── DEBUG: Print forcing data on host ─────────
+    // std::cout << "[HOST DEBUG] Forcing count chunk.nForc=" << chunk.nForc << std::endl;
+    // for (int f = 0; f < chunk.nForc; ++f) {
+    //     size_t base0 = 0;
+    //     for (int k = 0; k < f; ++k) base0 += chunk.nT[k] * chunk.systems;
+    //     std::cout << "   forcing[" << f << "] dt=" << chunk.dt[f]
+    //             << " nT=" << chunk.nT[f]
+    //             << " first=" << chunk.h_data[base0 + 0 * chunk.systems + 0] << "\n";
+    // }
+
+
+    
+
 
 }
 
@@ -555,7 +675,7 @@ SolverInputs prepareSolverInputs(int simYear,
 
 
 // ───────── Allocate GPU buffers and launch solver kernel
-SolverOutputs launchSolverKernel(const SolverInputs& input) {
+SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc) {
     SolverOutputs out;
     int num_queries = input.h_query_times.size();
     int num_systems = input.h_y0.size() / Runoff5::N_EQ;
@@ -602,9 +722,9 @@ SolverOutputs launchSolverKernel(const SolverInputs& input) {
         out.num_systems, out.num_queries,   // Number of systems and queries
         input.t0, input.tf,                 // Simulation time bounds
         d_sp,                               // Device pointer to spatial parameters
-        out.d_stiff,                        // Flags buffer
-        d_forc_data,                        // Forcing data
-    nForc                                   // Number of forcings
+        out.d_stiff                        // Flags buffer
+    //     d_forc_data,                        // Forcing data
+    // nForc                                   // Number of forcings
     );
 
     CUDA_CHECK( cudaPeekAtLastError() );     // reports launch-time errors
@@ -634,6 +754,17 @@ void handleSolverOutputs(const ModelConfig& config,
         input.t0, input.tf,
         devSpatialParamsPtr
     );
+
+    // ───── DEBUG: Print first 5 time steps for system s=0 ─────
+    // std::cout << "[DEBUG STATE] First 5 time steps for s=0:\n";
+    // for (int t = 0; t < std::min(5, nq); ++t) {
+    //     std::cout << "  t=" << t << " → ";
+    //     for (int i = 0; i < N_EQ; ++i) {
+    //         double val = h_dense[(0 * nq + t) * N_EQ + i]; // correct index
+    //         std::cout << val << (i < N_EQ - 1 ? ", " : "");
+    //     }
+    //     std::cout << "\n";
+    // }
 
     // Update stream objects with final y0 state 
     for (int s = 0; s < ns; ++s) {
@@ -706,6 +837,48 @@ void handleSolverOutputs(const ModelConfig& config,
 
 
     std::cout << "[DONE] Outputs written for " << ns << " systems × " << nq << " time steps\n";
+
+    // ───── DEBUG: Final state for s=0 after the chunk ─────
+    // std::cout << "[DEBUG OUTPUT] Final state for s=0 after last time step:\n";
+    // for (int i = 0; i < N_EQ; ++i) {
+    //     std::cout << "  y_final[" << i << "] = " << h_y_final[i] << std::endl;
+    // }
+
+    // ───── DEBUG Output: Inspecting Model State Variables for First System Across Initial Query Times ─────
+    // { 
+    //     const int SYS  = 0;                 // first system
+    //     const int N_EQ = Runoff5::N_EQ;
+    //     const int nq   = output.num_queries;
+    //     const int max_q = std::min(6, nq);  // q = 0..5 inclusive
+
+    //     static const char* STATE_NAMES[Runoff5::N_EQ] = {
+    //         "SNOW_STORAGE",
+    //         "STATIC_STORAGE",
+    //         "SURFACE_STORAGE",
+    //         "GRAVITATIONAL_STORAGE",
+    //         "AQUIFER_STORAGE",
+    //         "TEMP_AIR",
+    //         "TEMP_SOIL",
+    //         "SURFACE_RUNOFF",
+    //         "TOTAL_RUNOFF"
+    //     };
+
+    //     std::cout << "[CHECK] States for system " << SYS
+    //             << " at q=0.." << (max_q - 1) << "\n";
+
+    //     for (int q = 0; q < max_q; ++q) {
+    //         double tq = input.h_query_times[q]; // minutes since chunk start
+    //         std::cout << "  q=" << q << "  t=" << tq << " min\n";
+    //         for (int c = 0; c < N_EQ; ++c) {
+    //             double val = h_dense[(SYS * nq + q) * N_EQ + c]; // [sys][q][comp]
+    //             std::cout << "    [" << c << "] " << STATE_NAMES[c]
+    //                     << " = " << val << "\n";
+    //         }
+    //     }
+    // }
+
+
+
 }
 
 
@@ -769,6 +942,20 @@ int main(int argc, char** argv) {
     if (!loadConfiguration(argv[1], config)) {
         return 1;
     }
+
+    {// ─ Set up GPU solver parameters from config ──
+        Runoff5::Parameters hostP;
+        hostP.rtol        = config.rtol;
+        hostP.atol        = config.atol;
+        hostP.safety      = config.safety;
+        hostP.minScale    = config.min_scale;
+        hostP.maxScale    = config.max_scale;
+        hostP.initialStep = config.initial_step;
+
+        // push into GPU constant memory
+        CUDA_CHECK(cudaMemcpyToSymbol(devParams, &hostP, sizeof(hostP)));
+    }
+
     GLOBAL_QUERY_DT = config.query_dt_minutes;   // set from YAML
     if (GLOBAL_QUERY_DT > 60.0) {
         std::cout << "[WARN] query_dt in config (" << GLOBAL_QUERY_DT 
@@ -810,6 +997,26 @@ int main(int argc, char** argv) {
     } else if (!usingMPI) {
         // Serial mode: load all parameters directly
         spatialParams = loadSpatialParams(config.parameters_path + config.spatially_varying_file);
+    }
+
+    if (!config.constant_parameters_index.empty()) {
+        for (auto &sp : spatialParams) {
+            for (size_t i = 0; i < config.constant_parameters_index.size(); ++i) {
+                int idx = config.constant_parameters_index[i];
+                double v = config.constant_parameters_values[i];
+
+                switch (idx) {
+                    case 0:  sp.c1     = v;  break;  // example: override c1
+                    case 1:  sp.Hu     = v;  break;  // override Hu
+                    case 2:  sp.infil  = v;  break;  // override infiltration rate
+                    case 3:  sp.perco  = v;  break;  // override percolation rate
+                    // … add further cases to map index → the correct SpatialParams field …
+                    default:
+                        std::cerr << "Warning: constant_param idx="<<idx
+                                <<" not recognized\n";
+                }
+            }
+        }
     }
 
     // Build stream objects for each spatial unit (each ODE system)
