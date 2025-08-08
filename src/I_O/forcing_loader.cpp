@@ -216,3 +216,79 @@ float NetCDFLoader::getValueFromChunk(const std::unique_ptr<float[]>& chunkData,
 bool NetCDFLoader::isDataLoaded() const {
     return ncid >= 0 && timeSize > 0 && latSize > 0 && lonSize > 0;
 }
+
+void NCForcing::loadData() {
+    size_t totalSystems = systems;
+    size_t totalDays    = days;
+
+    h_data.clear();
+    nForc = entries.size();
+    dt.clear();
+    nT.clear();
+
+    // Precompute total size for allocation
+    size_t totalSize = 0;
+    for (auto& e : entries) {
+        size_t stepsPerDay = static_cast<size_t>(24.0 / e.dt_hours);
+        dt.push_back(e.dt_hours);
+        nT.push_back(stepsPerDay * totalDays);
+        totalSize += totalSystems * stepsPerDay * totalDays;
+    }
+    h_data.reserve(totalSize);
+
+    // ───── Load each forcing ─────
+    for (size_t f = 0; f < entries.size(); ++f) {
+        std::cout << "[FORCING DEBUG] Loading " << entries[f].var_name
+                  << " from " << entries[f].file << std::endl;
+
+        NetCDFLoader loader(entries[f].file, entries[f].var_name);
+
+        size_t stepsPerDay = static_cast<size_t>(24.0 / entries[f].dt_hours);
+        size_t numTimeSteps = stepsPerDay * totalDays;
+
+        auto chunkData = loader.loadTimeChunk(offset * stepsPerDay, numTimeSteps);
+
+        size_t latSize = loader.getLatSize();
+        size_t lonSize = loader.getLonSize();
+
+        // ───── Flatten data as [f][t][s] ─────
+        for (size_t t = 0; t < numTimeSteps; ++t) {
+            for (size_t s = 0; s < totalSystems; ++s) {
+                auto [ilat, ilon] = mapper.getLatLon(systemIds[s]);
+                if (ilat < 0 || ilon < 0) {
+                    throw std::runtime_error("Invalid lat/lon mapping for system " +
+                                              std::to_string(systemIds[s]));
+                }
+
+                size_t idx3d = t * (latSize * lonSize) + ilat * lonSize + ilon;
+                h_data.push_back(chunkData[idx3d]);
+            }
+        }
+
+        std::cout << "[FORCING DEBUG] f=" << f 
+                  << " nT=" << numTimeSteps 
+                  << " first=" << h_data[h_data.size() - totalSystems] << std::endl;
+    }
+
+    std::cout << "[FORCING DEBUG] Final h_data size=" << h_data.size() << std::endl;
+
+    
+    // ───────────── DEBUG: Print forcing values for f=0 at t=0 and t=1 ─────────────
+    if (!h_data.empty()) {
+        size_t s = 0; // First system
+        size_t f_precip = 0; // Assuming f=0 is precipitation
+        size_t stepsPerDay_precip = static_cast<size_t>(24.0 / entries[f_precip].dt_hours);
+        size_t totalSystems = systems;
+
+        // Index for f=0 t=0 s=0
+        size_t idx_t0 = (0 * totalSystems) + s;  
+        std::cout << "[DEBUG CHECK] Forcing f=0 t=0 s=0 → "
+                  << h_data[idx_t0] << std::endl;
+
+        // Index for f=0 t=1 s=0 (next hour)
+        size_t idx_t1 = (1 * totalSystems) + s;  
+        std::cout << "[DEBUG CHECK] Forcing f=0 t=1 s=0 → "
+                  << h_data[idx_t1] << std::endl;
+    }
+    
+}
