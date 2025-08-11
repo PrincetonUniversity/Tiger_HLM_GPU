@@ -1,6 +1,6 @@
 #pragma once
 
-#include "config_loader.hpp"        // for ModelConfig
+#include "I_O/config_loader.hpp"        // for ModelConfig
 #include "stream.hpp"               // for Stream<Runoff5>
 #include "models/model_Runoff5.hpp"     // for Runoff5::N_EQ, etc.
 #include <cuda_runtime.h>           // for CUDA runtime API
@@ -10,60 +10,8 @@
 #include <cstdint>                  // for std::uint64_t, std::int64_t
 #include <utility>                  // for std::pair
 #include <cstring>                  // for memset
+#include "I_O/forcing_loader.hpp"
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Forcing Entry + NCForcing Struct 
-//// ────────────────────────────────────────────────────────────────────────────
-
-/**
- * @brief Represents a single forcing input (e.g., temperature, precipitation).
- */
-struct ForcingEntry {
-    std::string path;       // Full path to the forcing data file
-    std::string var_name;   // Variable name in the NetCDF file
-    double dt_hr;           // Time step in hours for this forcing variable
-};
-
-/**
- * @brief Holds all forcing data for a simulation chunk.
- * 
- * This struct contains multiple ForcingEntry objects, along with
- * pre-allocated vectors for data and metadata needed for the simulation.
- */
-struct NCForcing {
-    std::vector<ForcingEntry> entries;  // Forcing entries for this chunk
-    std::vector<float> h_data;          // Host-side data buffer for all forcings
-    std::vector<double> dt;             // Time step for each forcing entry in hours
-    std::vector<size_t> nT;             // Number of time steps for each forcing entry
-    int nForc = 0;                      // Number of forcing entries loaded
-    int days = 0;                       // Number of days in this chunk
-    int offset = 0;                     // Day offset from the start of the simulation period
-    int systems = 0;                    // Number of systems (e.g., streams) this forcing applies to
-
-    void loadData() {
-        nForc = entries.size();
-        h_data.clear();
-        dt.clear();
-        nT.clear();
-
-        for (const auto& entry : entries) {
-            double dt_hr = entry.dt_hr;
-            dt.push_back(dt_hr);
-
-            size_t steps_per_day = static_cast<size_t>(24.0 / dt_hr);
-            size_t total_steps = steps_per_day * days;
-            nT.push_back(total_steps);
-
-            // For each timestep, push data for all systems
-            for (size_t t = 0; t < total_steps; ++t) {
-                for (int s = 0; s < systems; ++s) {
-                    h_data.push_back(1.0f);  // Placeholder
-                }
-            }
-        }
-    }
-
-};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Forcing Utilities
@@ -76,7 +24,8 @@ NCForcing loadForcingData(const ModelConfig& config,    // Simulation model conf
                           int simYear,                  // Simulation year
                           int dayOffset,                // Offset in days from the start of the simulation
                           int daysThisChunk,            // Number of days in this chunk
-                          int num_systems);             // Number of systems (e.g., streams) this forcing applies to
+                          int num_systems,
+                          const std::vector<Stream<Runoff5>>& streams);             // Number of systems (e.g., streams) this forcing applies to
 
 /**
  * @brief Uploads host-side forcing data to GPU memory.
@@ -120,8 +69,7 @@ SolverInputs prepareSolverInputs(int simYear,                                   
 /**
  * @brief Launches the solver on the GPU.
  */
-SolverOutputs launchSolverKernel(const SolverInputs& input);
-
+SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc); // Solver inputs
 
 /**
  * @brief Transfers and post-processes the solver outputs.
@@ -202,10 +150,48 @@ void advanceDate(int& year, int& month, int& day, int num_days);
 std::string formatDate(int year, int month, int day);
 
 /**
- * @brief Parses a date string in the format "YYYY-MM-DD" into a std::tm structure.
+ * @brief Simulate a contiguous window ("chunk") of days for all streams on the GPU.
  *
- * @param date_str Date string to parse.
- * @return Parsed std::tm structure.
+ * Orchestrates one end-to-end chunk execution:
+ *  1) Loads and maps external forcings for the window [simYear, dayOffset, daysThisChunk]
+ *     using the configured forcing files and the stream→lat/lon mapper.
+ *  2) Uploads forcing arrays and metadata to device symbols
+ *     (d_forc_data, nForc, c_forc_dt, c_forc_nT).
+ *  3) Prepares solver inputs (absolute minutes t0→tf, flattened y0, query times).
+ *  4) Launches the RK45 kernel (with in-kernel access to forcings), times execution,
+ *     and retrieves dense/final outputs.
+ *  5) Writes NetCDF files (final_, dense_, runoff_) for the chunk and updates each
+ *     stream’s y0 with the final state to seed the next chunk.
+ *
+ * Logging/Debug:
+ *  - Prints the chunk date range and basic spatial params for system 0.
+ *  - Optionally checks device forcing layout via checkForcingsOnDeviceSafe<<<1,1>>>.
+ *  - Emits timing for solver and output writing.
+ *
+ * Assumptions:
+ *  - Time units inside the solver are minutes since Jan 1 of simYear
+ *    (t0 = dayOffset * 24 * 60; tf = t0 + daysThisChunk * 24 * 60).
+ *  - Forcings are laid out on device as a single 1D array with blocks per forcing:
+ *        [ forcing f ][ timestep t ][ system s ]
+ *    and indexed via a prefix-sum over c_forc_nT to handle per-forcing lengths.
+ *  - streams.size() == num_systems and each Stream<Runoff5> holds valid SpatialParams.
+ *
+ * Notes:
+ *  - Updates device globals that the kernel reads (d_forc_data, nForc, c_forc_dt, c_forc_nT).
+ *  - Writes NetCDF outputs under config.output_path.
+ *  - Mutates `streams[*].y0` to the final state for continuity across chunks.
+ *
+ * @param config        Simulation configuration (paths, tolerances, output settings).
+ * @param streams       Vector of stream systems to simulate (provides y0 & SpatialParams).
+ * @param simYear       Four-digit year for this chunk (used for absolute time origin & filenames).
+ * @param dayOffset     Zero-based day index within simYear where the chunk starts.
+ * @param daysThisChunk Number of days to simulate in this chunk (>= 1).
+ *
+ * @throws std::runtime_error if forcing mapping/files cannot be loaded or if
+ *         no forcing data is available for the requested window.
+ *
+ * @note This function does not return a value; results are written to disk and the
+ *       in-memory streams are advanced to the chunk’s final state.
  */
 void simulateChunk(const ModelConfig& config,
                    std::vector<Stream<Runoff5>>& streams,

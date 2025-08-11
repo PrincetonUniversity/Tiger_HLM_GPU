@@ -6,8 +6,8 @@
 #include "radau_kernel.cuh"     // declaration of radau_kernel_multi
 #include "radau_step_dense.cuh"       // radau_step() and radau_dense()
 #include "event_detector.cuh"   // reuse norm_inf, norm_inf_diff if needed
-#include "models/model_Runoff5.hpp" // brings in Runoff5
-#include "I_O/forcing_data.h"
+#include "../models/model_Runoff5.hpp" // brings in Runoff5
+#include "../I_O/forcing_data.h"
 
 // ---------- DEBUG BOUNDS MACRO ----------
 #ifndef DBG_ASSERT

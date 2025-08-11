@@ -8,6 +8,14 @@
 #include <unordered_map>
 #include <utility>  // for std::pair
 #include <vector>
+#include "../stream.hpp"  // Stream<Runoff5> is defined in stream.hpp
+
+// ─────────── ForcingEntry ───────────
+// struct ForcingEntry {
+//     std::string file;       // Full path to the NetCDF file
+//     std::string var_name;   // Variable name inside the NetCDF
+//     double dt_hours;        // Time resolution in hours
+// };
 
 
 class LookupMapper {
@@ -86,4 +94,50 @@ public:
     int getVariableId() const { return varid; }
 };
 
+
+// ─────────── NCForcing ───────────
+// class NCForcing {
+// public:
+//     std::vector<ForcingEntry> entries;   // List of forcing files and metadata
+//     std::vector<float> h_data;           // Flattened forcing data [f][time][system]
+//     LookupMapper mapper;                 // Maps system ID → (lat, lon)
+//     std::vector<long long> systemIds;    // IDs for each hydrologic system
+//     size_t systems;                      // Number of systems
+//     size_t days;                         // Number of days in this chunk
+//     size_t offset;                       // Time offset (start index in file)
+
+//     int nForc;
+//     std::vector<double> dt;    
+//     std::vector<size_t> nT; 
+//     void loadData();  
+// };
+struct ForcingEntry {
+    std::string file;       // Full path to the NetCDF file
+    std::string var_name;   // Variable name inside the NetCDF
+    double dt_hours;        // Time resolution in hours
+};
+
+class NCForcing {
+public:
+    std::vector<ForcingEntry> entries;
+    std::vector<float> h_data;
+    LookupMapper mapper;
+    std::vector<long long> systemIds;
+    size_t systems = 0;
+    size_t days = 0;
+    size_t offset = 0;
+
+    int nForc = 0;
+    std::vector<double> dt;
+    std::vector<size_t> nT;
+
+    // Default constructor (allows NCForcing chunk; to work)
+    NCForcing() : mapper("") {}
+
+    // Existing constructor initializes mapper with a path
+    explicit NCForcing(const std::string& mapperPath)
+        : mapper(mapperPath) {}
+
+    void loadData();
+};
 

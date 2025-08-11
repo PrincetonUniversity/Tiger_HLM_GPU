@@ -7,9 +7,9 @@
 #include <tuple>                    // for std::make_tuple, std::tuple
 #include <cstring>                  // for std::memset
 #include "rk45.h"                   // For rk45_then_radau_multi<…> and radau_kernel_multi<…>
-#include "parameters_loader.hpp"    // for SpatialParams
-#include "models/model_Runoff5.hpp"     // For Runoff5::N_EQ, ::SP_TYPE, etc.
-#include "I_O/forcing_data.h"
+#include "../I_O/parameters_loader.hpp"    // for SpatialParams
+#include "../models/model_Runoff5.hpp"     // For Runoff5::N_EQ, ::SP_TYPE, etc.
+#include "../I_O/forcing_data.h"
 
 
 // ────────────────────────────────────────────────
@@ -59,12 +59,12 @@ auto setup_gpu_buffers(
     size_t bytes_final   = sizeof(double) * num_systems * N_EQ;
     size_t bytes_queries = sizeof(double) * num_queries;
     size_t bytes_dense   = sizeof(double) * num_systems * N_EQ * num_queries;
-    size_t bytes_stiff   = sizeof(int)    * num_systems;             // new
+    size_t bytes_stiff   = sizeof(int)    * num_systems;             
 
     // Device pointers
     double *d_y0_all = nullptr, *d_y_final_all = nullptr;
     double *d_query_times = nullptr, *d_dense_all = nullptr;
-    int    *d_stiff = nullptr;                                      // new
+    int    *d_stiff = nullptr;                                    
     cudaError_t err;
 
     // Allocate
@@ -95,7 +95,7 @@ auto setup_gpu_buffers(
     return std::make_tuple(
         d_y0_all, d_y_final_all,
         d_query_times, d_dense_all,
-        d_stiff,                  // new
+        d_stiff,                
         num_systems, num_queries
     );
 }
@@ -235,7 +235,7 @@ std::pair<FinalType, DenseType> retrieve_and_free(
     size_t bytes_final = sizeof(double) * num_systems * N_EQ;
     size_t bytes_dense = sizeof(double) * num_systems * N_EQ * num_queries;
     size_t bytes_stiff = sizeof(int)    * num_systems;
-    size_t bytes_y0    = sizeof(double) * num_systems * N_EQ;   // <— new
+    size_t bytes_y0    = sizeof(double) * num_systems * N_EQ;  
 
     // 3a) Copy device → host for solution & stiffness flags
     FinalType      h_y_final_all(num_systems * N_EQ);
@@ -281,8 +281,9 @@ std::pair<FinalType, DenseType> retrieve_and_free(
     //     }
     //   }
     // }
+
     // No reordering needed, just move the data
-    DenseType h_dense_all = std::move(h_dense_raw);
+    DenseType h_dense_all = std::move(h_dense_raw); // [sys][q][comp]
 
     // ——————————————————————————————————————————————————————————
     // Overwrite the q=0 slice in h_dense_all with the true y0
