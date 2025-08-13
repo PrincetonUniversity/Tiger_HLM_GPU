@@ -12,25 +12,24 @@
 #include "../I_O/forcing_data.h"
 
 
-// ────────────────────────────────────────────────
-// ────────── Forward‐declare your Radau‐only kernel ──────────
+// ────────── Forward‐declare Radau‐only kernel ──────────
 // Must exactly match the definition in solver/radau_kernel.cu
 template <class Model>
 __global__
 void radau_kernel_multi(
-    double*                              y0_all, // 1
-    double*                              y_final_all, // 2
-    double*                              query_times, // 3
-    double*                              dense_all, // 4
-    int                                  num_systems,   // 5 
-    int                                  num_queries,   // 6
-    double                               t0,    // 7
-    double                               tf,        // 8
-    const typename Model::SP_TYPE* d_sp,       // 9
-    int*                           stiff_system_indices,    // 10
-    int                                  n_stiff,     // 11
+    double* y0_all, 
+    double* y_final_all, 
+    double* query_times, 
+    double* dense_all, 
+    int num_systems,   
+    int num_queries,   
+    double t0,    
+    double tf,       
+    const typename Model::SP_TYPE* d_sp,       
+    int* stiff_system_indices,    
+    int n_stiff,     
     const float* d_forc_data,
-    int          nForc
+    int nForc
 );
 
 
@@ -111,7 +110,7 @@ auto setup_gpu_buffers(
 //     double* d_y_final_all,
 //     double* d_query_times,
 //     double* d_dense_all,
-//     int*    d_stiff,            // new
+//     int*    d_stiff,           
 //     int     num_systems,
 //     int     num_queries,
 //     double  t0,
@@ -121,16 +120,16 @@ auto setup_gpu_buffers(
 //     constexpr int N_EQ = Runoff5::N_EQ;
 //     size_t bytes_final = sizeof(double) * num_systems * N_EQ;
 //     size_t bytes_dense = sizeof(double) * num_systems * N_EQ * num_queries;
-//     size_t bytes_stiff = sizeof(int)    * num_systems;            // new
+//     size_t bytes_stiff = sizeof(int)    * num_systems;           
 
 //     // 3a) Copy device → host for solution & stiffness flags
 //     FinalType h_y_final_all(num_systems * N_EQ);
 //     DenseType h_dense_raw(num_systems * N_EQ * num_queries);
-//     std::vector<int> h_stiff(num_systems);                        // new
+//     std::vector<int> h_stiff(num_systems);                        
 
 //     cudaMemcpy(h_y_final_all.data(), d_y_final_all, bytes_final,   cudaMemcpyDeviceToHost);
 //     cudaMemcpy(h_dense_raw.data(),    d_dense_all,    bytes_dense, cudaMemcpyDeviceToHost);
-//     cudaMemcpy(h_stiff.data(),        d_stiff,        bytes_stiff, cudaMemcpyDeviceToHost);  // new
+//     cudaMemcpy(h_stiff.data(),        d_stiff,        bytes_stiff, cudaMemcpyDeviceToHost);  
 
 //     // Free stiffness‐flag array now
 //     cudaFree(d_stiff);
@@ -160,19 +159,19 @@ auto setup_gpu_buffers(
 //         int blocks2 = (n_stiff + TPB - 1) / TPB;
 //         radau_kernel_multi<Runoff5>
 //           <<< blocks2, TPB >>>(
-//             d_y0_all,         // 1
-//             d_y_final_all,    // 2
-//             d_query_times,    // 3
-//             d_dense_all,      // 4
-//             num_systems,      // 5
-//             num_queries,      // 6
-//             t0,               // 7
-//             tf,               // 8
-//             d_sp,             // 9
-//             d_stiff_idxs,     // 10
-//             n_stiff,           // 11
+//             d_y0_all,        
+//             d_y_final_all,   
+//             d_query_times,    
+//             d_dense_all,      
+//             num_systems,     
+//             num_queries,     
+//             t0,              
+//             tf,               
+//             d_sp,            
+//             d_stiff_idxs,     
+//             n_stiff,           
 //             d_forc_data,
-//             nForc              // number of forcings
+//             nForc              
 //           );
 //         cudaDeviceSynchronize();
 //         // launch‐error check
