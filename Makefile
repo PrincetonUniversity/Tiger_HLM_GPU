@@ -27,12 +27,16 @@ VERBOSE ?= 0
 HOST_INCLUDES   := -I$(SRC_DIR) -I$(IO_DIR) -I$(SOLVER_DIR) -I$(MODELS_DIR)
 DEVICE_INCLUDES := -I$(SRC_DIR) -I$(SOLVER_DIR) -I$(MODELS_DIR) -I$(IO_DIR)
 
+# Compiler flags
 NVCCFLAGS := -std=c++17 -rdc=true \
-  -gencode arch=compute_90,code=compute_90 \
+  -gencode arch=compute_70,code=sm_70 \
+  -gencode arch=compute_80,code=sm_80 \
   -gencode arch=compute_90,code=sm_90 \
+  -gencode arch=compute_90,code=compute_90 \
   -Xcudafe --diag_suppress=177 \
   -Xcudafe --diag_suppress=20091 \
   $(DEVICE_INCLUDES) -DUSE_MODEL_5 -Wno-deprecated-gpu-targets
+
 
 # Embed version and date into the binary
 NVCCFLAGS += -DPROJECT_VERSION="\"Tiger-HLM Runoff version $(VERSION)\"" \
