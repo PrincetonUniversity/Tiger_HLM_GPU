@@ -7,7 +7,6 @@
 #include <cctype>
 
 // Implementation of SimpleYamlParser methods
-
 void SimpleYamlParser::parseFile(const std::string& filename) {
     std::ifstream file(filename);
     if (!file.is_open()) {
@@ -346,7 +345,6 @@ void SimpleYamlParser::printParsedData() {
 }
 
 // Implementation of ConfigLoader methods
-
 ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     SimpleYamlParser parser;
     parser.parseFile(filename);
@@ -420,10 +418,6 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     config.final_output = parser.getBool("output.final_output");
     config.final_output_file = parser.getString("output.final_output_file");
     config.runoff_output_file = parser.getString("output.runoff_output_file");
-
-
-    // Compression level for NetCDF
-    config.output_compression_level = parser.getInt("output.compression_level");
     
     // Load solver
     config.rtol = parser.getDouble("solver.rtol");
@@ -436,110 +430,7 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     config.override_initial_step = parser.getBool("solver.override_initial_step");
     
     // Load flags
-    config.uses_dam = parser.getBool("flags.uses_dam");
-    config.convert_area = parser.getBool("flags.convert_area");
     config.use_mpi = parser.getBool("flags.use_mpi", false);
-
-    // Load MPI
-    // config.step_storage = parser.getInt("mpi.step_storage");
-    // config.transfer_buffer = parser.getInt("mpi.transfer_buffer");
-    // config.discontinuity_buf = parser.getInt("mpi.discontinuity_buf");
     
     return config;
 }
-
-// // Example usage
-// int main() {
-//     try {
-//         // Load configuration from file
-//         ModelConfig config = ConfigLoader::loadConfig("../../data/config.yaml");
-        
-//         // Print loaded configuration
-//         std::cout << "=== Loaded Configuration ===" << std::endl;
-
-//         std::cout << " -- model -- " << std::endl;
-//         std::cout << "Model UID: " << config.model_uid << std::endl;
-//         std::cout << "Model Name: " << config.model_name << std::endl;
-
-//         std::cout << " -- time_period -- " << std::endl;
-//         std::cout << "Time Period: " << config.time_start << " to " << config.time_end << std::endl;
-
-//         std::cout << " -- initial -- " << std::endl;
-//         std::cout << "Initial Mode: " << config.initial_mode << std::endl;
-//         std::cout << "Initial File: " << config.initial_file << std::endl;
-
-//         std::cout << " -- parameters -- " << std::endl;
-//         std::cout << "Parameters Path: " << config.parameters_path << std::endl;
-//         std::cout << "Spatially Varying File: " << config.spatially_varying_file << std::endl;
-//         std::cout << "Constant Parameters Index: " << config.constant_parameters_index.size() << std::endl;
-//         for (const auto& index : config.constant_parameters_index) {
-//             std::cout << "  - Index: " << index << std::endl;
-//         }
-//         std::cout << "Constant Parameters Values: " << config.constant_parameters_values.size() << std::endl;
-//         for (const auto& value : config.constant_parameters_values) {
-//             std::cout << "  - Value: " << value << std::endl;
-//         }
-
-//         std::cout << " -- forcings -- " << std::endl;
-//         std::cout << "Forcings Type: " << config.forcings_type << std::endl;
-//         std::cout << "Forcings Path: " << config.forcings_path << std::endl;
-//         std::cout << "Time Chunking: " << config.time_chunking << std::endl;
-//         std::cout << "Forcing Variables: " << config.forcing_variables.size() << std::endl;
-//         for (const auto& var : config.forcing_variables) {
-//             std::cout << "  - Name: " << var.name 
-//                       << ", File: " << var.file 
-//                       << ", Var Name: " << var.var_name 
-//                       << ", Time Resolution: " << var.time_resolution 
-//                       << ", Chunk Size: " << var.time_chunk_size 
-//                       << ", Required: " << (var.required) 
-//                       << std::endl;
-//         }
-
-//         std::cout << " -- forcing_mappings -- " << std::endl;
-//         std::cout << "Forcing Mappings Path: " << config.forcing_mappings_path << std::endl;
-//         std::cout << "Forcing Mapping Variables: " << config.forcing_mappings.size() << std::endl;
-//         for (const auto& mapping : config.forcing_mappings) {
-//             std::cout << "  - Name: " << mapping.name 
-//                       << ", File: " << mapping.file 
-//                       << std::endl;
-//         }
-
-//         std::cout << " -- output -- " << std::endl;
-//         std::cout << "Print Interval: " << config.print_interval << std::endl;
-//         std::cout << "Output States: " << config.output_states.size() << std::endl;
-//         for (const auto& state : config.output_states) {
-//             std::cout << "  - State: " << state << std::endl;
-//         }
-//         std::cout << "Output Path: " << config.output_path << std::endl;
-//         std::cout << "Output File: " << config.output_file << std::endl;
-//         std::cout << "Final Output: " << (config.final_output) << std::endl;
-//         std::cout << "Final Output File: " << config.final_output_file << std::endl;
-
-//         std::cout << " -- solver -- " << std::endl;
-//         std::cout << "Solver RTOL: " << config.rtol << std::endl;
-//         std::cout << "Solver ATOL: " << config.atol << std::endl;
-//         std::cout << "Solver Safety: " << config.safety << std::endl;
-//         std::cout << "Solver Min Scale: " << config.min_scale << std::endl;
-//         std::cout << "Solver Max Scale: " << config.max_scale << std::endl;
-//         std::cout << "Override Tolerances: " << config.override_tolerances << std::endl;
-//         std::cout << "Initial Step: " << config.initial_step << std::endl;
-//         std::cout << "Override Initial Step: " << config.override_initial_step << std::endl;
-
-//         std::cout << " -- mpi -- " << std::endl;
-//         std::cout << "Step Storage: " << config.step_storage << std::endl;
-//         std::cout << "Transfer Buffer: " << config.transfer_buffer << std::endl;
-//         std::cout << "Discontinuity Buffer: " << config.discontinuity_buf << std::endl;
-
-//         std::cout << " -- flags -- " << std::endl;
-//         std::cout << "Uses Dam: " << (config.uses_dam) << std::endl;
-//         std::cout << "Convert Area: " << (config.convert_area) << std::endl;
-        
-//         std::cout << "==============================" << std::endl;
-        
-//     } catch (const std::exception& e) {
-//         std::cerr << "Error: " << e.what() << std::endl;
-//         return 1;
-//     }
-    
-//     return 0;
-// }
