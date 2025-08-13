@@ -70,11 +70,3 @@ solver:
 
 flags:
   use_mpi: true                  # Set to false to disable MPI and run in serial
-  uses_dam: false                # Whether to include dam operation logic (if model supports it)
-  convert_area: false            # Whether to apply unit conversion to area values (e.g. mm → m³)
-
-# These settings are needed for MPI memory management and inter-process communication
-# mpi:
-#   step_storage: 10               # Number of timesteps to retain in memory per process
-#   transfer_buffer: 1000          # MPI buffer size for inter-process data transfer
-#   discontinuity_buf: 50          # Buffer space to handle discontinuities or jump points
