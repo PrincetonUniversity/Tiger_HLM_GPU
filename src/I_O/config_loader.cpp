@@ -354,8 +354,6 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
 
     // Load general information section
     config.description = parser.getString("description");
-
-    
     
     // Load model section
     config.model_uid = parser.getInt("model.uid");
@@ -415,7 +413,6 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     config.output_states = parser.getIntArray("output.states");
     config.output_path = parser.getString("output.output_path");
     config.output_file = parser.getString("output.output_file");
-    config.final_output = parser.getBool("output.final_output");
     config.final_output_file = parser.getString("output.final_output_file");
     config.runoff_output_file = parser.getString("output.runoff_output_file");
     
