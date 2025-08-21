@@ -16,14 +16,14 @@ initial:
   file: ""                       # Path to file (if mode is "from_file")
 
 parameters:
-  path: "./data/Stony_Brook/" # Change path your input directory    # Directory where parameter files live
-  spatially_varying_file: "./Stony_Brook_spatial_params.csv"        # CSV file with per-link parameters
+  path: "data/Stony_Brook/" # Change path your input directory    # Directory where parameter files live
+  spatially_varying_file: "Stony_Brook_spatial_params.csv"        # CSV file with per-link parameters
   constant_parameters_index: [1, 2, 3]                              # Indices (variable numbers) for constants
   constant_parameters_values: [0.1, 0.05, 0.01]                     # Values for the constant parameters (same order)
 
 forcings:
   type: "yearly"                 # Input format for forcings ("netcdf", could support others)
-  path: "../data/Stony_Brook/"   # Directory containing NetCDF forcing files
+  path: "data/Stony_Brook/"   # Directory containing NetCDF forcing files
   time_chunking: true            # Whether to load forcing data in chunks (useful for long time periods)
 
   variables:
@@ -44,7 +44,7 @@ forcings:
       dims: "time, latitude, longitude"      # Dimensions of the variable in the NetCDF file
 
 forcing_mappings:
-  path: "." # Change path your input directory   # Path to lookup files that map stream ID → lat/lon
+  path: "data/Stony_Brook/" # Change path your input directory   # Path to lookup files that map stream ID → lat/lon
   variables:
     - name: "pr"                                 # Must match name in `forcings.variables`
       file: "Stony_Brook_pr_AORC_lookup.csv"     # CSV with stream ID → lat/lon gridpoint
@@ -55,7 +55,7 @@ output:
   print_interval: 1                                   # Controls how often to print (e.g. chunk index or timestep)
   query_dt: 60.0                                      # Interval between outputs in minutes
   states: [0, 1, 2, 3, 4, 5, 6, 7, 8]                 # Which state variables to output
-  output_path: "./data/Stony_Brook/outputs/dense_60"  # Where to store results
+  output_path: "./data/Stony_Brook/outputs"  # Where to store results
   output_file: "dense.nc"                             # Default dense output filename (can be overridden per chunk)
   final_output_file: "final.nc"                       # Name of the final state NetCDF file
   runoff_output_file: "runoff.nc"                     # Name of the runoff NetCDF file
@@ -71,4 +71,4 @@ solver:
   override_initial_step: true    # If true, overrides automatic h0 guess with this value
 
 flags:
-  use_mpi: true                  # Set to false to disable MPI and run in serial
+  use_mpi: false                  # Set to false to disable MPI and run in serial

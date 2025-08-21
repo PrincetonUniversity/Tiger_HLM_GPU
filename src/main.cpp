@@ -975,7 +975,15 @@ void handleSolverOutputs(const ModelConfig& config,
     advanceDate(Y, M, D, daysThisChunk - 1);
     std::string eDate = formatDate(Y, M, D);
     // Append rank only when running with MPI
-    std::string rank_tag = usingMPI ? ("_rank" + std::to_string(rank)) : "";
+    // std::string rank_tag = usingMPI ? ("_rank" + std::to_string(rank)) : "";
+    // Append rank only when truly running multi-rank under MPI
+    int world_size = 1;
+    if (usingMPI) {
+        MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    }
+    std::string rank_tag = (usingMPI && world_size > 1)
+                            ? ("_rank" + std::to_string(rank))
+                            : ""; // Only append rank if using MPI and more than 1 rank
     // Construct output file paths
     std::string final_file    = config.output_path + "/final_"   + sDate + "_" + eDate + rank_tag + ".nc";
     std::string dense_file    = config.output_path + "/dense_"   + sDate + "_" + eDate + rank_tag + ".nc";
