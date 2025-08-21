@@ -15,10 +15,9 @@
  * @param N_EQ              Number of state variables (size of state_vals).
  */
 void write_dense_netcdf(const std::string& filename,
-                        const double* h_dense,
+                        const float* h_dense,
                         const double* time_vals,
-                        // const int* linkid_vals,
-                        const uint32_t* linkid_vals, // new: 32-bit unsigned integer
+                        const uint32_t* linkid_vals, 
                         const int* state_vals,
                         int num_queries,
                         int num_systems,
@@ -38,8 +37,7 @@ void write_dense_netcdf(const std::string& filename,
  */
 void write_final_netcdf(const std::string& filename,
                         const double* h_y_final,
-                        // const int* linkid_vals,
-                        const uint32_t* linkid_vals, // new: 32-bit unsigned integer
+                        const uint32_t* linkid_vals, 
                         const int* state_vals,
                         int num_systems,
                         int N_EQ);
@@ -59,7 +57,7 @@ void write_final_netcdf(const std::string& filename,
  * @param num_systems       Number of systems/links (size of linkid_vals).
  */
 void write_runoff_dense_netcdf(const std::string& filename,
-                              const double*      h_dense,
+                              const float*      h_dense,
                               const double*      time_vals,
                               const uint32_t*    linkid_vals,
                               int                num_queries,
@@ -85,7 +83,7 @@ void write_runoff_dense_netcdf(const std::string& filename,
  * @param full_N_EQ           Total number of variables in h_dense (Runoff5::N_EQ).
  */
 void write_selected_dense_netcdf(const std::string& filename,
-                                 const double*      h_dense,
+                                 const float*      h_dense,
                                  const double*      time_vals,
                                  const uint32_t*    linkid_vals,
                                  const int*         selected_states,

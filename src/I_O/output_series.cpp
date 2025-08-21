@@ -3,7 +3,7 @@
 #include <iostream>
 #include <vector>
 #include <cstdint>
-#include <cstddef>            // for ptrdiff_t
+#include <cstddef>       
 #include "models/model_Runoff5.hpp"
 
 
@@ -22,10 +22,9 @@
  * @brief Write a dense 3D array to a NetCDF file.
  */
 void write_dense_netcdf(const std::string& filename,
-                        const double* h_dense,
+                        const float* h_dense,
                         const double* time_vals,
-                        // const int* linkid_vals, // change to stream ID
-                        const uint32_t* linkid_vals, // new: 32-bit unsigned integer
+                        const uint32_t* linkid_vals, 
                         const int* state_vals, 
                         int num_queries,
                         int num_systems,
@@ -41,12 +40,9 @@ void write_dense_netcdf(const std::string& filename,
     // Define dimensions
     NC_CHECK(nc_def_dim(ncid, "system", num_systems, &sys_dimid));
     NC_CHECK(nc_def_dim(ncid, "time", num_queries, &time_dimid));
-    //NC_CHECK(nc_def_dim(ncid, "time", NC_UNLIMITED, &time_dimid));
     NC_CHECK(nc_def_dim(ncid, "variable", N_EQ, &var_dimid));
 
     // Define coordinate variables
-    // NC_CHECK(nc_def_var(ncid, "system", NC_INT, 1, &sys_dimid, &sys_varid));
-    // new: 32-bit unsinged integer
     NC_CHECK(nc_def_var(ncid, "system", NC_UINT, 1, &sys_dimid, &sys_varid));
     NC_CHECK(nc_def_var(ncid, "time", NC_DOUBLE, 1, &time_dimid, &time_varid));
     NC_CHECK(nc_def_var(ncid, "variable", NC_INT, 1, &var_dimid, &var_varid));
@@ -54,7 +50,6 @@ void write_dense_netcdf(const std::string& filename,
     // Add attributes
     NC_CHECK(nc_put_att_text(ncid, sys_varid, "long_name", 6, "LinkID"));
     NC_CHECK(nc_put_att_text(ncid, time_varid, "long_name", 4, "Time"));
-    // NC_CHECK(nc_put_att_text(ncid, time_varid, "units", 37, "minutes since start of simulation"));
     std::string tu = "minutes since " + time_origin;
     NC_CHECK(nc_put_att_text(ncid, time_varid, "units",
                              tu.size(), tu.c_str()));
@@ -66,19 +61,18 @@ void write_dense_netcdf(const std::string& filename,
 
     // Define main data variable
     int dims[3] = {sys_dimid, time_dimid, var_dimid};
-    NC_CHECK(nc_def_var(ncid, "outputs", NC_DOUBLE, 3, dims, &dense_varid));
+    NC_CHECK(nc_def_var(ncid, "outputs", NC_FLOAT, 3, dims, &dense_varid));
 
     // End define mode
     NC_CHECK(nc_enddef(ncid));
 
     // Write coordinate variables
-    // NC_CHECK(nc_put_var_int(ncid, sys_varid, linkid_vals));
-    NC_CHECK(nc_put_var_uint( ncid, sys_varid, linkid_vals));// new: 32-bit unsigned integer
+    NC_CHECK(nc_put_var_uint( ncid, sys_varid, linkid_vals));
     NC_CHECK(nc_put_var_double(ncid, time_varid, time_vals));
     NC_CHECK(nc_put_var_int(ncid, var_varid, state_vals));
 
     // Write main data
-    NC_CHECK(nc_put_var_double(ncid, dense_varid, h_dense));
+    NC_CHECK(nc_put_var_float(ncid, dense_varid, h_dense));
 
     // Close file
     NC_CHECK(nc_close(ncid));
@@ -89,8 +83,7 @@ void write_dense_netcdf(const std::string& filename,
  */
 void write_final_netcdf(const std::string& filename,
                         const double* h_y_final,
-                        // const int* linkid_vals, //change to stream ID
-                        const uint32_t* linkid_vals, // new: 32-bit unsigned integer
+                        const uint32_t* linkid_vals, 
                         const int* state_vals,
                         int num_systems,
                         int N_EQ) {
@@ -105,8 +98,6 @@ void write_final_netcdf(const std::string& filename,
     NC_CHECK(nc_def_dim(ncid, "variable", N_EQ, &var_dimid));
 
     // Define coordinate variables
-    // NC_CHECK(nc_def_var(ncid, "system", NC_INT, 1, &sys_dimid, &sys_varid));
-    // new: 32-bit unsinged integer
     NC_CHECK(nc_def_var(ncid, "system", NC_UINT, 1, &sys_dimid, &sys_varid));
     NC_CHECK(nc_def_var(ncid, "variable", NC_INT, 1, &var_dimid, &var_varid));
 
@@ -125,8 +116,7 @@ void write_final_netcdf(const std::string& filename,
     NC_CHECK(nc_enddef(ncid));
 
     // Write coordinate variables
-    // NC_CHECK(nc_put_var_int(ncid, sys_varid, linkid_vals));
-    NC_CHECK(nc_put_var_uint(ncid, sys_varid, linkid_vals)); // new: 32-bit unsigned integer
+    NC_CHECK(nc_put_var_uint(ncid, sys_varid, linkid_vals)); 
     NC_CHECK(nc_put_var_int(ncid, var_varid, state_vals));
 
     // Write main data
@@ -141,7 +131,7 @@ void write_final_netcdf(const std::string& filename,
  *        (system × time × variable) array into a NetCDF file.
  */
 void write_runoff_dense_netcdf(const std::string& filename,
-                              const double*      h_dense,
+                              const float*      h_dense,
                               const double*      time_vals,
                               const uint32_t*    linkid_vals,
                               int                num_queries,
@@ -169,7 +159,6 @@ void write_runoff_dense_netcdf(const std::string& filename,
     // Add attributes
     NC_CHECK(nc_put_att_text(ncid, sys_varid,  "long_name", 6,  "LinkID"));
     NC_CHECK(nc_put_att_text(ncid, time_varid, "long_name", 4,  "Time"));
-    // NC_CHECK(nc_put_att_text(ncid, time_varid, "units",     37, "minutes since start of simulation"));
     std::string tu = "minutes since " + time_origin;
     NC_CHECK(nc_put_att_text(ncid, time_varid, "units",
                              tu.size(), tu.c_str()));
@@ -178,8 +167,8 @@ void write_runoff_dense_netcdf(const std::string& filename,
 
     // Define runoff variables
     int dims2[2] = { sys_dimid, time_dimid };
-    NC_CHECK(nc_def_var(ncid, "surface_runoff", NC_DOUBLE, 2, dims2, &surf_varid));
-    NC_CHECK(nc_def_var(ncid, "total_runoff",   NC_DOUBLE, 2, dims2, &total_varid));
+    NC_CHECK(nc_def_var(ncid, "surface_runoff", NC_FLOAT, 2, dims2, &surf_varid));
+    NC_CHECK(nc_def_var(ncid, "total_runoff",   NC_FLOAT, 2, dims2, &total_varid));
 
     // End define mode
     NC_CHECK(nc_enddef(ncid));
@@ -189,19 +178,20 @@ void write_runoff_dense_netcdf(const std::string& filename,
     NC_CHECK(nc_put_var_double(ncid, time_varid, time_vals));
 
     // Extract surface and total runoff into temporary buffers
-    std::vector<double> surf_data(num_systems * num_queries);
-    std::vector<double> total_data(num_systems * num_queries);
+    std::vector<float> surf_data(size_t(num_systems) * size_t(num_queries));
+    std::vector<float> total_data(size_t(num_systems) * size_t(num_queries));
+
     for (int s = 0; s < num_systems; ++s) {
         for (int t = 0; t < num_queries; ++t) {
-            int base = (s * num_queries + t) * Runoff5::N_EQ;
-            surf_data[s * num_queries + t]  = h_dense[base + SURF_IDX];
-            total_data[s * num_queries + t] = h_dense[base + TOTAL_IDX];
+            const size_t base = (size_t(s) * size_t(num_queries) + size_t(t)) * size_t(Runoff5::N_EQ);
+            surf_data[size_t(s) * size_t(num_queries) + size_t(t)]  = h_dense[base + size_t(SURF_IDX)];
+            total_data[size_t(s) * size_t(num_queries) + size_t(t)] = h_dense[base + size_t(TOTAL_IDX)];
         }
     }
 
     // Write runoff data
-    NC_CHECK(nc_put_var_double(ncid, surf_varid,  surf_data.data()));
-    NC_CHECK(nc_put_var_double(ncid, total_varid, total_data.data()));
+    NC_CHECK(nc_put_var_float(ncid, surf_varid,  surf_data.data()));
+    NC_CHECK(nc_put_var_float(ncid, total_varid, total_data.data()));
 
     // Close file
     NC_CHECK(nc_close(ncid));
@@ -212,7 +202,8 @@ void write_runoff_dense_netcdf(const std::string& filename,
  * 
  */
 void write_selected_dense_netcdf(const std::string& filename,
-                                 const double*      h_dense,
+                                //  const double*      h_dense,
+                                 const float*      h_dense,
                                  const double*      time_vals,
                                  const uint32_t*    linkid_vals,
                                  const int*         selected_states,
@@ -241,7 +232,6 @@ void write_selected_dense_netcdf(const std::string& filename,
     // Add attributes
     NC_CHECK(nc_put_att_text(ncid, sys_varid,  "long_name", 6,  "LinkID"));
     NC_CHECK(nc_put_att_text(ncid, time_varid, "long_name", 4,  "Time"));
-    // NC_CHECK(nc_put_att_text(ncid, time_varid, "units",     37, "minutes since start of simulation"));
     std::string tu = "minutes since " + time_origin;
     NC_CHECK(nc_put_att_text(ncid, time_varid, "units",
                              tu.size(), tu.c_str()));
@@ -253,7 +243,7 @@ void write_selected_dense_netcdf(const std::string& filename,
     for (int i = 0; i < num_selected; ++i) {
         NC_CHECK(nc_def_var(ncid,
                             state_names[i],
-                            NC_DOUBLE,
+                            NC_FLOAT,
                             2,
                             dims2,
                             &varids[i]));
@@ -267,17 +257,18 @@ void write_selected_dense_netcdf(const std::string& filename,
     NC_CHECK(nc_put_var_double(ncid, time_varid, time_vals));
 
     // For each selected variable, extract into a temp buffer and write
-    std::vector<double> buffer(num_systems * num_queries);
+    std::vector<float> buffer(size_t(num_systems) * size_t(num_queries));
     for (int i = 0; i < num_selected; ++i) {
         int idx = selected_states[i];
         for (int s = 0; s < num_systems; ++s) {
             for (int t = 0; t < num_queries; ++t) {
                 // layout: (s * num_queries + t) * full_N_EQ + idx
-                buffer[s * num_queries + t] =
-                    h_dense[(s * num_queries + t) * full_N_EQ + idx];
+                const size_t linear = size_t(s) * size_t(num_queries) + size_t(t);
+                const size_t src    = linear * size_t(full_N_EQ) + idx;
+                buffer[linear] = h_dense[src];
             }
         }
-        NC_CHECK(nc_put_var_double(ncid, varids[i], buffer.data()));
+        NC_CHECK(nc_put_var_float(ncid, varids[i], buffer.data()));
     }
 
     // Close file

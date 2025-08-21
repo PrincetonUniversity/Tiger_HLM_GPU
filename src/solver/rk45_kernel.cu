@@ -33,7 +33,8 @@ __global__ void rk45_then_radau_multi(
     double* y0_all,       // [num_systems × N_EQ]
     double* y_final_all,  // [num_systems × N_EQ]
     double* query_times,  // [num_queries]
-    double* dense_all,    // [num_systems × N_EQ × num_queries]
+    //double* dense_all,    // [num_systems × N_EQ × num_queries]
+    float* dense_all,
     int     num_systems,
     int     num_queries,
     double  t0,
@@ -143,7 +144,9 @@ __global__ void rk45_then_radau_multi(
                         long long idx = ((long long)sys * num_queries + next_q) * N_EQ + c;
                         DBG_ASSERT(idx < (long long)num_systems * num_queries * N_EQ, 
                                 "OOB idx=%lld sys=%d q=%d c=%d", idx, sys, next_q, c);
-                        dense_all[idx] = yd[c];
+                        // dense_all[idx] = yd[c];
+                        dense_all[idx] = static_cast<float>(yd[c]); // convert to float
+
 
                      }
                 }
@@ -187,7 +190,8 @@ template __global__ void rk45_then_radau_multi<Runoff5>(
     double*,          // y0_all
     double*,          // y_final_all
     double*,          // query_times
-    double*,          // dense_all
+    //double*,          // dense_all
+    float*,          // dense_all
     int,              // num_systems
     int,              // num_queries
     double,           // t0

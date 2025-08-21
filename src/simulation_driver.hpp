@@ -1,17 +1,17 @@
 #pragma once
 
-#include "I_O/config_loader.hpp"        // for ModelConfig
-#include "stream.hpp"               // for Stream<Runoff5>
-#include "models/model_Runoff5.hpp"     // for Runoff5::N_EQ, etc.
-#include <cuda_runtime.h>           // for CUDA runtime API
-#include <string>                   // for std::string
-#include <vector>                   // for std::vector
-#include <memory>                   // for std::shared_ptr
-#include <cstdint>                  // for std::uint64_t, std::int64_t
-#include <utility>                  // for std::pair
-#include <cstring>                  // for memset
+#include <cuda_runtime.h>           
+#include <string>                   
+#include <vector>                  
+#include <memory>                 
+#include <cstdint>                  
+#include <utility>                 
+#include <cstring>                 
 #include "I_O/forcing_loader.hpp"
 
+#include "I_O/config_loader.hpp"        // for ModelConfig
+#include "stream.hpp"                   // for Stream<Runoff5>
+#include "models/model_Runoff5.hpp"     // for Runoff5::N_EQ, etc.
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Forcing Utilities
@@ -24,8 +24,8 @@ NCForcing loadForcingData(const ModelConfig& config,    // Simulation model conf
                           int simYear,                  // Simulation year
                           int dayOffset,                // Offset in days from the start of the simulation
                           int daysThisChunk,            // Number of days in this chunk
-                          int num_systems,
-                          const std::vector<Stream<Runoff5>>& streams);             // Number of systems (e.g., streams) this forcing applies to
+                          int num_systems,              // Number of systems (e.g., streams) to simulate
+                          const std::vector<Stream<Runoff5>>& streams);  // Number of systems (e.g., streams) this forcing applies to
 
 /**
  * @brief Uploads host-side forcing data to GPU memory.
@@ -52,7 +52,7 @@ struct SolverOutputs {
     double* d_y0_all;       // Device pointer to initial conditions (flattened)
     double* d_y_final_all;  // Device pointer to final states (flattened)
     double* d_query_times;  // Device pointer to query times (flattened)
-    double* d_dense_all;    // Device pointer to dense output (flattened)
+    float* d_dense_all;    // Device pointer to dense output (flattened)
     int* d_stiff;           // Device pointer to stiffness flags (1 if stiff, 0 if not)
     int num_systems;        // Number of systems (e.g., streams) processed
     int num_queries;        // Number of query times (e.g., hourly outputs)
@@ -64,8 +64,8 @@ struct SolverOutputs {
 SolverInputs prepareSolverInputs(int simYear,                                   // Simulation year
                                  int dayOffset,                                 // Offset in days from the start of the simulation
                                  int daysThisChunk,                             // Number of days in this chunk
-                                 const std::vector<Stream<Runoff5>>& streams); // Streams to simulate
-
+                                 const std::vector<Stream<Runoff5>>& streams,   // Streams to simulate
+                                 bool include_tf);                              // Whether to include final time in queries
 /**
  * @brief Launches the solver on the GPU.
  */
@@ -82,7 +82,9 @@ void handleSolverOutputs(const ModelConfig& config,                 // Simulatio
                          int daysThisChunk,                         // Number of days in this chunk
                          const SolverInputs& input,                 // Solver inputs                                                       
                          const SolverOutputs& output,               // Solver outputs
-                         std::vector<Stream<Runoff5>>& streams);   // Streams to update with final states and dense outputs
+                         std::vector<Stream<Runoff5>>& streams,      // Streams to update with final states
+                         int rank = 0, bool usingMPI = false);      // Rank of the MPI process (default 0, for single-process runs)
+                          
 
 
 /**
@@ -195,5 +197,7 @@ std::string formatDate(int year, int month, int day);
  */
 void simulateChunk(const ModelConfig& config,
                    std::vector<Stream<Runoff5>>& streams,
-                   int simYear, int dayOffset, int daysThisChunk);
+                   int simYear, int dayOffset, int daysThisChunk,
+                   int rank = 0, bool usingMPI = false,
+                   bool include_tf = false);
 

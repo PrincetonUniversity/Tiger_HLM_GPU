@@ -1,11 +1,10 @@
-//I_O/parameters_loader.hpp
 #pragma once
 #include <string>
 #include <vector>
 
-// -----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // SpatialParams
-// -----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Holds all of the per‐stream, spatially varying parameters that Model204::rhs
 // expects.  The CSV must have these columns (case‐sensitive):
 //
@@ -15,7 +14,7 @@
 //   melt_f,temp_thr
 //
 // where `stream` and `next_stream` are integer IDs, and the rest are doubles.
-// -----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 struct SpatialParams {
     long   stream;
     long   next_stream;
@@ -39,11 +38,11 @@ struct SpatialParams {
 };
 
 
-// -----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // loadSpatialParams
-// -----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Reads `csv_path` (must be UTF‐8, with comma separators, and a header row as above)
 // and returns a vector of SpatialParams, one per data row.
 // Throws std::runtime_error on I/O or parse errors.
-// -----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 std::vector<SpatialParams> loadSpatialParams(const std::string& csv_path);

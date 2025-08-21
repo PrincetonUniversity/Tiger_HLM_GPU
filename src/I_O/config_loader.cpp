@@ -372,31 +372,137 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     config.spatially_varying_file = parser.getString("parameters.spatially_varying_file");
     config.constant_parameters_index = parser.getIntArray("parameters.constant_parameters_index");
     config.constant_parameters_values = parser.getDoubleArray("parameters.constant_parameters_values");
-    
+
     // Load forcings
     config.forcings_type = parser.getString("forcings.type");
+    std::transform(config.forcings_type.begin(), config.forcings_type.end(),
+                config.forcings_type.begin(), ::tolower);
+
+    // Default to "yearly" if omitted / unexpected
+    if (config.forcings_type != "yearly" && config.forcings_type != "ranged") {
+        config.forcings_type = "yearly";
+    }
+
     config.forcings_path = parser.getString("forcings.path");
     config.time_chunking = parser.getBool("forcings.time_chunking");
-    
+
     // Load forcing variables
     auto forcingVars = parser.getObjectArray("forcings.variables");
     for (const auto& varMap : forcingVars) {
         ForcingVariable var;
-        var.name = varMap.at("name");
-        var.file = varMap.at("file");
-        var.var_name = varMap.at("var_name");
+
+        // required fields
+        var.name            = varMap.at("name");
+        var.var_name        = varMap.at("var_name");
         var.time_resolution = varMap.at("time_resolution");
-        // var.time_chunk_size = std::stoi(varMap.at("time_chunk_size"));
-        auto it = varMap.find("time_chunk_size");
-        if (it != varMap.end()) {
+        var.required        = (varMap.at("required") == "true");
+
+        // optional time_chunk_size
+        if (auto it = varMap.find("time_chunk_size"); it != varMap.end()) {
             var.time_chunk_size = std::stoi(it->second);
         } else {
-            var.time_chunk_size = -1;  // Use -1 or 0 to signal "unspecified"
+            var.time_chunk_size = -1;
         }
-        var.required = (varMap.at("required") == "true");
+
+        // yearly vs ranged-by-name (driven by forcings.type)
+        var.ranged_by_name = (config.forcings_type == "ranged");
+
+        // read optional fields
+        if (auto it = varMap.find("file"); it != varMap.end()) {
+            var.file = it->second;
+        }
+        if (auto it = varMap.find("file_pattern"); it != varMap.end()) {
+            var.file_pattern = it->second;
+        }
+
+        // Accept `file:` as alias for `file_pattern:` in ranged mode
+        if (var.ranged_by_name && var.file_pattern.empty()) {
+            if (!var.file.empty()) {
+                // Only adopt if it actually looks like a ranged template
+                if (var.file.find("{start}") != std::string::npos &&
+                    var.file.find("{end}")   != std::string::npos) {
+                    var.file_pattern = var.file;
+                }
+            }
+        }
+
+        // NOTE: current SimpleYamlParser does not capture nested arrays per-variable (e.g., `files:`).
+        // We rely on file_pattern (or file mapped to file_pattern) in ranged mode.
+             
+        // Dimension names: defaults match AORC (time, latitude, longitude)
+        // Users can override with dims_time/dims_lat/dims_lon or with
+        // a shorthand: dims: "time, lat, lon".
+        auto trim_ws = [](std::string s) {
+            size_t b = s.find_first_not_of(" \t\r\n");
+            if (b == std::string::npos) return std::string();
+            size_t e = s.find_last_not_of(" \t\r\n");
+            return s.substr(b, e - b + 1);
+        };
+
+        std::string d_time = "time";
+        std::string d_lat  = "latitude";
+        std::string d_lon  = "longitude";
+
+        if (auto it = varMap.find("dims_time"); it != varMap.end() && !it->second.empty())
+            d_time = it->second;
+        if (auto it = varMap.find("dims_lat"); it != varMap.end() && !it->second.empty())
+            d_lat = it->second;
+        if (auto it = varMap.find("dims_lon"); it != varMap.end() && !it->second.empty())
+            d_lon = it->second;
+
+        if (auto it = varMap.find("dims"); it != varMap.end() && !it->second.empty()) {
+            std::vector<std::string> toks;
+            std::stringstream ss(it->second);
+            std::string tok;
+            while (std::getline(ss, tok, ',')) toks.push_back(trim_ws(tok));
+            if (toks.size() == 3) {
+                if (!toks[0].empty()) d_time = toks[0];
+                if (!toks[1].empty()) d_lat  = toks[1];
+                if (!toks[2].empty()) d_lon  = toks[2];
+            } else {
+                throw std::runtime_error(
+                    "For forcing '" + var.name + "': 'dims' must have exactly 3 comma-separated names (time, lat, lon).");
+            }
+        }
+
+        var.dims_time = d_time;
+        var.dims_lat  = d_lat;
+        var.dims_lon  = d_lon;
+
+
         config.forcing_variables.push_back(var);
     }
-    
+
+    // Validate/normalize forcing vars
+    for (auto& v : config.forcing_variables) {
+        if (v.ranged_by_name) {
+            // Must have a pattern with {start} and {end}
+            if (v.file_pattern.empty()) {
+                throw std::runtime_error(
+                    "For ranged forcing '" + v.name +
+                    "' provide 'file' or 'file_pattern' containing {start} and {end}.");
+            }
+            if (v.file_pattern.find("{start}") == std::string::npos ||
+                v.file_pattern.find("{end}")   == std::string::npos) {
+                throw std::runtime_error(
+                    "Ranged forcing '" + v.name +
+                    "': pattern must include both {start} and {end}.");
+            }
+        } else {
+            // yearly
+            if (v.file.empty()) {
+                throw std::runtime_error(
+                    "For yearly forcing '" + v.name +
+                    "' please provide 'file' with {year}.");
+            }
+            if (v.file.find("{year}") == std::string::npos) {
+                throw std::runtime_error(
+                    "Yearly forcing '" + v.name +
+                    "': 'file' must include {year}.");
+            }
+        }
+    }
+
     // Load forcing mappings
     config.forcing_mappings_path = parser.getString("forcing_mappings.path");
     auto mappingVars = parser.getObjectArray("forcing_mappings.variables");

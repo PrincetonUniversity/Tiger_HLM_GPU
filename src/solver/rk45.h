@@ -42,7 +42,7 @@ __global__ void rk45_then_radau_multi(
     double* y0_all,                         // initial states for each system
     double* y_final_all,                    // final states for each system
     double* query_times,                    // query times for dense output
-    double* dense_all,                      // dense output buffer
+    float* dense_all,                       // dense output buffer [sys][q][comp] as float
     int     num_systems,                    // number of independent systems being integrated in parallel
     int     num_queries,                    // number of query times per system
     double  t0,                             // initial time of integration
