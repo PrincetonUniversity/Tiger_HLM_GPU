@@ -110,7 +110,7 @@ NetCDFLoader::NetCDFLoader(const std::string& filename, const std::string& varNa
     status = nc_inq_dimlen(ncid, dimids[2], &lonSize);
     checkError(status, "Getting longitude dimension size");
     
-    std::cout << "Dataset dimensions: " << timeSize << " x " << latSize << " x " << lonSize << std::endl;
+    // std::cout << "Dataset dimensions: " << timeSize << " x " << latSize << " x " << lonSize << std::endl;
 }
  
 // Destructor
@@ -188,9 +188,9 @@ std::unique_ptr<float[]> NetCDFLoader::loadTimeChunk(size_t startTime, size_t nu
     int status = nc_get_vara_float(ncid, varid, start, count, data.get());
     checkError(status, "Reading variable data");
     
-    std::cout << "Loaded time chunk: steps " << startTime << " to "
-              << (startTime + actualTimeSteps - 1) << " (" << actualTimeSteps
-              << " time steps)" << std::endl;
+    // std::cout << "Loaded time chunk: steps " << startTime << " to "
+    //           << (startTime + actualTimeSteps - 1) << " (" << actualTimeSteps
+    //           << " time steps)" << std::endl;
     
     return data;
 }

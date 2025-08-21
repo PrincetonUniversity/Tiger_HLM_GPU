@@ -33,7 +33,7 @@ std::vector<SpatialParams> loadSpatialParams(const std::string& csv_path) {
 
     // Required columns: match CSV's names
     const std::vector<std::string> required = {
-        "stream", "next_stream",
+        "stream", // "next_stream",
         "i2", "i3",               // infiltration/percolation fractions
         "hu",                     // → SpatialParams::Hu
         "centroid_lon",           // → SpatialParams::lon
@@ -42,7 +42,7 @@ std::vector<SpatialParams> loadSpatialParams(const std::string& csv_path) {
         "n",                      // → SpatialParams::n_mann
         "slope",
         "length_km",              // → SpatialParams::L
-        "drainage_area_km2",      // → SpatialParams::A_i
+        // "drainage_area_km2",      // → SpatialParams::A_i
         "area_sqkm",              // → SpatialParams::A_h
         "melt",                   // → SpatialParams::melt_f
         "t_thres",                // → SpatialParams::temp_thr
@@ -73,7 +73,17 @@ std::vector<SpatialParams> loadSpatialParams(const std::string& csv_path) {
 
         SpatialParams p;
         p.stream      = std::stol(fields[idx["stream"]]);
-        p.next_stream = std::stol(fields[idx["next_stream"]]);
+        // Optional next_stream: default to -1 when the column is absent or blank
+        auto it_next = idx.find("next_stream");
+        if (it_next != idx.end()) {
+            const std::string& v = fields[it_next->second];
+            if (!v.empty())
+                p.next_stream = std::stol(v);
+            else
+                p.next_stream = -1;
+        } else {
+            p.next_stream = -1;
+        }
 
         // store conversion factor for downstream code
         p.c1 = 0.001/60.0;
@@ -89,7 +99,7 @@ std::vector<SpatialParams> loadSpatialParams(const std::string& csv_path) {
         p.slope    = std::stod(fields[idx["slope"]]); // average slope of hillslope [m/m]
         p.L        = std::stod(fields[idx["length_km"]]);   // length of channel [km] 
         p.A_h      = std::stod(fields[idx["area_sqkm"]]); // area of hillslopes in [km²]
-        p.A_i = std::stod(fields[idx["drainage_area_km2"]]); // drainage area in [km²], don't need this parameter for runoff !!! remove it
+        // p.A_i = std::stod(fields[idx["drainage_area_km2"]]); // drainage area in [km²], don't need this parameter for runoff !!! remove it
         p.melt_f   = std::stod(fields[idx["melt"]]); 
         p.temp_thr = std::stod(fields[idx["t_thres"]]); // temperature threshold for snowmelt [°C]
 

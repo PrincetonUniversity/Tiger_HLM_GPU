@@ -55,37 +55,26 @@ struct ModelConfig {
     std::vector<ForcingMapping> forcing_mappings;
     
     // Output
-    int print_interval;
+    int print_interval; // time step for output in minutes
     double query_dt_minutes;   // time step for query output in minutes
-    std::vector<int> output_states;
+    std::vector<int> output_states; // list of state indices to output
     std::string output_path;
     std::string output_file;
-    bool final_output;
     std::string final_output_file;
-    std::string runoff_output_file;
-
-    // Compression level for NetCDF (0-9, default 0)
-    int output_compression_level = 0;        
+    std::string runoff_output_file;  
     
     // Solver
-    double rtol;
-    double atol;
-    double safety;
-    double min_scale;
-    double max_scale;
-    bool override_tolerances;
-    double initial_step;
-    bool override_initial_step;
+    double rtol;                // relative tolerance for the solver
+    double atol;                // relative and absolute tolerances for the solver
+    double safety;              // safety factor for the solver
+    double min_scale;           // minimum scale factor for the solver
+    double max_scale;           // maximum scale factor for the solver
+    bool override_tolerances;   // whether to use rtol, atol, safety, min_scale, max_scale from config
+    double initial_step;        // initial step size for the solver
+    bool override_initial_step; // whether to use initial_step from config
     
     // Flags
-    bool uses_dam;
-    bool convert_area;
-    bool use_mpi;
-
-    // MPI
-    // int step_storage;
-    // int transfer_buffer;
-    // int discontinuity_buf;
+    bool use_mpi;  // Use MPI for parallel execution
 };
 
 // Simple YAML parser class

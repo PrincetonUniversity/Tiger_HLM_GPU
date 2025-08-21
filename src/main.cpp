@@ -67,6 +67,21 @@ std::tm parseDate(const std::string& iso_date) {
     return t;
 }
 
+// Days in month for (Y, M)
+// int daysInMonth(int Y, int M) {
+//     static const int dm[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+//     if (M == 2) return isLeapYear(Y) ? 29 : 28;
+//     return dm[M-1];
+// }
+
+// // Convert (year + 0-based day-of-year offset) -> (Y,M,D)
+// struct YMD { int Y, M, D; };
+// YMD ymdFromYearAndDayOffset(int year, int dayOffset) {
+//     int Y = year, M = 1, D = 1;
+//     advanceDate(Y, M, D, dayOffset);
+//     return {Y, M, D};
+// }
+
 // Compute days since Jan 1 of that year
 int computeDayOfYear(const std::tm& t) {
     std::tm jan1 = t;
@@ -459,6 +474,70 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
 
 }
 
+
+// void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff5>>& streams) {
+//     const int TOTAL_DAYS = isLeapYear(year) ? 366 : 365;
+//     const int num_systems = static_cast<int>(streams.size());
+
+//     // Parse full start and end dates
+//     std::tm start_tm = parseDate(config.time_start);
+//     std::tm end_tm   = parseDate(config.time_end);
+
+//     // Only simulate if this year overlaps with config window
+//     if (start_tm.tm_year + 1900 > year || end_tm.tm_year + 1900 < year)
+//         return;
+
+//     // Determine bounds within this year
+//     int start_day = (start_tm.tm_year + 1900 == year) ? computeDayOfYear(start_tm) : 0;
+//     int end_day   = (end_tm.tm_year + 1900 == year)   ? computeDayOfYear(end_tm)   : (TOTAL_DAYS - 1);
+
+//     printSimHeader(year, start_day, end_day, num_systems);
+
+//     // Memory cap in days based on 15 GiB limit
+//     const int memCapDays = std::max(1, computeDaysPerChunk(num_systems));
+
+//     // Optional user cap in days from YAML
+//     int userCapDays = -1;
+//     for (const auto& f : config.forcing_variables) {
+//         if (f.time_chunk_size > 0) {
+//             userCapDays = f.time_chunk_size;
+//             break;
+//         }
+//     }
+
+//     // Detect if we are in monthly file mode
+//     bool monthlyFiles = false;
+//     for (const auto& f : config.forcing_variables) {
+//         if (f.file.find("{month}") != std::string::npos) {
+//             monthlyFiles = true;
+//             break;
+//         }
+//     }
+
+//     // Loop over chunks
+//     for (int dayOffset = start_day; dayOffset <= end_day; ) {
+//         int remainingDays = end_day - dayOffset + 1;
+//         int daysThisChunk = remainingDays;
+
+//         if (monthlyFiles) {
+//             auto [Y, M, D] = ymdFromYearAndDayOffset(year, dayOffset);
+//             const int dim           = daysInMonth(Y, M);
+//             const int dayInMonth0   = D - 1;             // 0-based index
+//             const int daysLeftMonth = dim - dayInMonth0; // incl. today
+//             daysThisChunk = std::min(daysThisChunk, daysLeftMonth);
+//         }
+
+//         // Apply memory and user caps
+//         daysThisChunk = std::min(daysThisChunk, memCapDays);
+//         if (userCapDays > 0) {
+//             daysThisChunk = std::min(daysThisChunk, userCapDays);
+//         }
+
+//         simulateChunk(config, streams, year, dayOffset, daysThisChunk);
+//         dayOffset += daysThisChunk;
+//     }
+// }
+
 // ───────── Dynamically compute how many days per chunk fit in memory ─────────
 int computeDaysPerChunk(int num_systems) {
     constexpr std::uint64_t MAX_BYTES = 15ULL * 1024 * 1024 * 1024; // 15 GiB limit
@@ -507,21 +586,21 @@ void simulateChunk(const ModelConfig& config,
     // ───────── Copy forcings to device ─────────
     uploadForcingsToGpu(forcingChunk);
 
-    // SANITY: print first 3 precipitation & t2m values for system 0
-    std::cout << "[SANITY-FORC] first 3 pr/t2m at sys=0:\n";
+    // DEBUG: print first 3 precipitation & t2m values for system 0
+    // std::cout << "[DEBUG-FORC] first 3 pr/t2m at sys=0:\n";
     for (int f = 0; f < forcingChunk.nForc; ++f) {
-    std::cout << " forcing " << f << " dt=" << forcingChunk.dt[f]
-                << " steps=" << forcingChunk.nT[f] << ": ";
+    // std::cout << " forcing " << f << " dt=" << forcingChunk.dt[f]
+    //             << " steps=" << forcingChunk.nT[f] << ": ";
     for (int t = 0; t < std::min<size_t>(3, forcingChunk.nT[f]); ++t) {
         // h_data is interleaved [f][t][system]
         size_t base = 0;
         for (int k = 0; k < f; ++k) base += forcingChunk.nT[k] * forcingChunk.systems;
         size_t idx = base + t * forcingChunk.systems + 0;
-
-        std::cout << forcingChunk.h_data[idx]
-                << (t+1 < std::min<size_t>(3,forcingChunk.nT[f]) ? ", " : "");
+        // Print first 3 values for system 0
+        // std::cout << forcingChunk.h_data[idx]
+        //         << (t+1 < std::min<size_t>(3,forcingChunk.nT[f]) ? ", " : "");
     }
-    std::cout << "\n";
+    // std::cout << "\n";
     }
 
 
@@ -599,6 +678,75 @@ NCForcing loadForcingData(const ModelConfig& config,
 
     return chunk;
 }
+
+
+// NCForcing loadForcingData(const ModelConfig& config,
+//                           int simYear,
+//                           int dayOffset,
+//                           int daysThisChunk,
+//                           int num_systems,
+//                           const std::vector<Stream<Runoff5>>& streams) {
+//     // Decide if monthly mode
+//     bool monthly = false;
+//     if (!config.forcing_variables.empty()) {
+//         monthly = (config.forcing_variables[0].file.find("{month}") != std::string::npos);
+//     }
+
+//     // Calendar date of this chunk's first day
+//     int Y = simYear, M = 1, D = 1;
+//     if (monthly) {
+//         auto ymd = ymdFromYearAndDayOffset(simYear, dayOffset);
+//         Y = ymd.Y;
+//         M = ymd.M;
+//         D = ymd.D;
+//     }
+
+//     std::vector<ForcingEntry> forcings;
+//     forcings.reserve(config.forcing_variables.size());
+//     for (const auto& f : config.forcing_variables) {
+//         double dt_hr = (f.time_resolution == "1h") ? 1.0 :
+//                        (f.time_resolution == "24h") ? 24.0 :
+//                        throw std::runtime_error("Unsupported resolution: " + f.time_resolution);
+
+//         std::string file = f.file;
+
+//         // Replace placeholders
+//         if (auto pos = file.find("{year}"); pos != std::string::npos) {
+//             file.replace(pos, 6, std::to_string(Y));
+//         }
+//         if (monthly) {
+//             if (auto pos = file.find("{month}"); pos != std::string::npos) {
+//                 char mm[3];
+//                 std::snprintf(mm, sizeof(mm), "%02d", M);
+//                 file.replace(pos, 7, mm); // zero-padded month
+//             }
+//         }
+
+//         forcings.push_back({ config.forcings_path + file, f.var_name, dt_hr });
+//     }
+
+//     NCForcing chunk;
+//     chunk.entries = std::move(forcings);
+//     chunk.days    = daysThisChunk;
+//     chunk.offset  = monthly ? (D - 1) : dayOffset; // day-of-month vs day-of-year
+//     chunk.systems = num_systems;
+
+//     // Initialize mapper
+//     std::string mapperFile = config.forcing_mappings_path + "/" + config.forcing_mappings[0].file;
+//     chunk.mapper = LookupMapper(mapperFile);
+//     if (!chunk.mapper.load()) {
+//         throw std::runtime_error("Failed to load stream → lat/lon mapping");
+//     }
+
+//     // Fill system IDs
+//     chunk.systemIds.resize(num_systems);
+//     for (size_t i = 0; i < num_systems; ++i) {
+//         chunk.systemIds[i] = streams[i].sp.stream;
+//     }
+
+//     return chunk;
+// }
+
 
 
 // ───────── Upload forcing data to device and copy pointer + metadata to device symbols
@@ -695,8 +843,24 @@ SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc) {
     out.num_queries   = query_count;
 
 
-    CUDA_CHECK(cudaMemset(out.d_dense_all, 0xAB,
-                      num_systems * Runoff5::N_EQ * num_queries * sizeof(double)));
+    // CUDA_CHECK(cudaMemset(out.d_dense_all, 0xAB,
+    //                   num_systems * Runoff5::N_EQ * num_queries * sizeof(double)));
+
+    // Compute dense buffer size safely (use size_t to avoid 32-bit overflow)
+    const size_t dense_elems =
+        size_t(out.num_systems) * size_t(Runoff5::N_EQ) * size_t(out.num_queries);
+    const size_t dense_bytes = dense_elems * sizeof(double);
+
+    // Optional paranoid overflow guard:
+    if (out.num_systems > 0 && out.num_queries > 0) {
+        const size_t back = dense_elems / size_t(Runoff5::N_EQ) / size_t(out.num_queries);
+        if (back != size_t(out.num_systems)) {
+            throw std::runtime_error("Overflow computing dense buffer size");
+        }
+    }
+
+    CUDA_CHECK(cudaMemset(out.d_dense_all, 0xAB, dense_bytes));
+
 
 
     // Determine launch configuration
@@ -943,6 +1107,32 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (!config.use_mpi) {
+        const char* ompi = std::getenv("OMPI_COMM_WORLD_SIZE");
+        const char* pmi  = std::getenv("PMI_SIZE");
+        int sz = ompi ? std::atoi(ompi) : (pmi ? std::atoi(pmi) : 1);
+
+        if (sz > 1) {
+            std::cerr
+                << "\nNote: This job was launched with MPI (" << sz << " processes)\n"
+                << "but the configuration has 'flags.use_mpi: false'.\n"
+                << "\n"
+                << "In this mode, each process will run the full simulation\n"
+                << "independently and write to the same output files.\n"
+                << "This usually causes duplicated work and may overwrite outputs.\n"
+                << "\n"
+                << "If you want to run in parallel, set 'flags.use_mpi: true'\n"
+                << "in your config. If you want a single serial run, launch with:\n"
+                << "    ./bin/runoff config.yaml\n"
+                << "or:\n"
+                << "    mpirun -np 1 ./bin/runoff config.yaml\n"
+                << "\nStopping now to avoid duplicate runs.\n"
+                << std::endl;
+            return EXIT_FAILURE;
+        }
+    }
+
+
     {// ─ Set up GPU solver parameters from config ──
         Runoff5::Parameters hostP;
         hostP.rtol        = config.rtol;
@@ -982,7 +1172,15 @@ int main(int argc, char** argv) {
 
     std::vector<SpatialParams> spatialParams;
 
-    if (usingMPI && rank == 0) {
+    // Handle size==1 with use_mpi: true (treat like serial)
+    if (usingMPI && size == 1) {
+        std::cout << "[INFO] MPI requested but only 1 process detected; "
+                    "running in single-rank mode.\n";
+        usingMPI = false; // fall through to serial path below
+    }
+
+    
+    if (usingMPI && size > 1 && rank == 0) { 
         // Root rank loads and distributes SpatialParams to workers
         std::cout << "[RANK 0] Acting as coordinator only\n";
         distributeSpatialParams(config, size);
