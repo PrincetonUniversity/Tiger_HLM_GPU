@@ -55,7 +55,7 @@ output:
   print_interval: 1                                   # Controls how often to print (e.g. chunk index or timestep)
   query_dt: 60.0                                      # Interval between outputs in minutes
   states: [0, 1, 2, 3, 4, 5, 6, 7, 8]                 # Which state variables to output
-  output_path: "./data/Stony_Brook/outputs/dense_60"  # Where to store results
+  output_path: "./data/Stony_Brook/outputs"  # Where to store results
   output_file: "dense.nc"                             # Default dense output filename (can be overridden per chunk)
   final_output_file: "final.nc"                       # Name of the final state NetCDF file
   runoff_output_file: "runoff.nc"                     # Name of the runoff NetCDF file
@@ -71,4 +71,4 @@ solver:
   override_initial_step: true    # If true, overrides automatic h0 guess with this value
 
 flags:
-  use_mpi: true                  # Set to false to disable MPI and run in serial
+  use_mpi: false                  # Set to false to disable MPI and run in serial
