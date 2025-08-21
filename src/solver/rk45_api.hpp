@@ -1,26 +1,26 @@
-// src/solver/rk45_api.hpp
 #pragma once
 
 #include <cuda_runtime.h>
 #include <vector>
 #include <stdexcept>
-#include <tuple>                    // for std::make_tuple, std::tuple
-#include <cstring>                  // for std::memset
-#include "rk45.h"                   // For rk45_then_radau_multi<…> and radau_kernel_multi<…>
-#include "../I_O/parameters_loader.hpp"    // for SpatialParams
-#include "../models/model_Runoff5.hpp"     // For Runoff5::N_EQ, ::SP_TYPE, etc.
-#include "../I_O/forcing_data.h"
+#include <tuple>                    
+#include <cstring>     
+
+#include "rk45.h"                           // For rk45_then_radau_multi<…> and radau_kernel_multi<…>
+#include "../I_O/parameters_loader.hpp"     // for SpatialParams
+#include "../models/model_Runoff5.hpp"      // For Runoff5::N_EQ, ::SP_TYPE, etc.
+#include "../I_O/forcing_data.h"            // For ForcingData structure
 
 
 // ────────── Forward‐declare Radau‐only kernel ──────────
-// Must exactly match the definition in solver/radau_kernel.cu
 template <class Model>
 __global__
 void radau_kernel_multi(
     double* y0_all, 
     double* y_final_all, 
     double* query_times, 
-    double* dense_all, 
+    // double* dense_all, 
+    float* dense_all, // Use float for dense output to save memory
     int num_systems,   
     int num_queries,   
     double t0,    
@@ -36,7 +36,8 @@ void radau_kernel_multi(
 
 namespace rk45_api {
 
-using DenseType = std::vector<double>;
+// using DenseType = std::vector<double>;
+using DenseType = std::vector<float>; // Use float for dense output to save memory
 using FinalType = std::vector<double>;
 
 // ───────── 1) Allocate GPU buffers & copy inputs ─────────
@@ -50,253 +51,202 @@ auto setup_gpu_buffers(
     const std::vector<double>& h_query_times
 ) {
     constexpr int N_EQ = Runoff5::N_EQ;
-    int num_systems = int(h_y0.size() / N_EQ);
-    int num_queries = int(h_query_times.size());
 
-    // Compute byte sizes
-    size_t bytes_y0      = sizeof(double) * num_systems * N_EQ;
-    size_t bytes_final   = sizeof(double) * num_systems * N_EQ;
-    size_t bytes_queries = sizeof(double) * num_queries;
-    size_t bytes_dense   = sizeof(double) * num_systems * N_EQ * num_queries;
-    size_t bytes_stiff   = sizeof(int)    * num_systems;             
+    // Logical sizes (kept as int to match the rest of the codebase API)
+    const int num_systems = static_cast<int>(h_y0.size() / N_EQ);
+    const int num_queries = static_cast<int>(h_query_times.size());
 
-    // Device pointers
+    // ---- Element counts (size_t) ----
+    const size_t y_elems     = size_t(num_systems) * size_t(N_EQ);
+    const size_t final_elems = y_elems;
+    const size_t query_elems = size_t(num_queries);
+    const size_t dense_elems = y_elems * size_t(num_queries);  // systems * N_EQ * queries
+    const size_t stiff_elems = size_t(num_systems);
+
+    // Guard against overflow in products
+    if (num_systems > 0 && num_queries > 0) {
+        const size_t back = (dense_elems / size_t(N_EQ)) / size_t(num_queries);
+        if (back != size_t(num_systems)) {
+            throw std::runtime_error("Overflow computing dense_elems");
+        }
+    }
+
+    // ---- Byte sizes ----
+    const size_t bytes_y0      = y_elems     * sizeof(double);
+    const size_t bytes_final   = final_elems * sizeof(double);
+    const size_t bytes_queries = query_elems * sizeof(double);
+    const size_t bytes_dense   = dense_elems * sizeof(float);   // float dense to save memory
+    const size_t bytes_stiff   = stiff_elems * sizeof(int);
+
+    // ---- Device pointers ----
     double *d_y0_all = nullptr, *d_y_final_all = nullptr;
-    double *d_query_times = nullptr, *d_dense_all = nullptr;
-    int    *d_stiff = nullptr;                                    
+    double *d_query_times = nullptr;
+    float  *d_dense_all = nullptr;
+    int    *d_stiff = nullptr;
+
+    // ---- Allocate device memory (with cleanup on failure) ----
     cudaError_t err;
 
-    // Allocate
     err = cudaMalloc(&d_y0_all, bytes_y0);
-    if (err != cudaSuccess) throw std::runtime_error("cudaMalloc d_y0_all failed");
-    err = cudaMalloc(&d_y_final_all, bytes_final);
-    if (err != cudaSuccess) { cudaFree(d_y0_all); throw std::runtime_error("cudaMalloc d_y_final_all failed"); }
-    err = cudaMalloc(&d_query_times, bytes_queries);
-    if (err != cudaSuccess) { cudaFree(d_y0_all); cudaFree(d_y_final_all); throw std::runtime_error("cudaMalloc d_query_times failed"); }
-    err = cudaMalloc(&d_dense_all, bytes_dense);
-    if (err != cudaSuccess) { cudaFree(d_y0_all); cudaFree(d_y_final_all); cudaFree(d_query_times); throw std::runtime_error("cudaMalloc d_dense_all failed"); }
-
-    // Allocate stiffness flags and zero‐initialize
-    err = cudaMalloc(&d_stiff, bytes_stiff);
-    if (err != cudaSuccess) { 
-        cudaFree(d_y0_all); cudaFree(d_y_final_all); cudaFree(d_query_times); cudaFree(d_dense_all);
-        throw std::runtime_error("cudaMalloc d_stiff failed");
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaMalloc d_y0_all failed: ") +
+                                 cudaGetErrorString(err));
     }
-    err = cudaMemset(d_stiff, 0, bytes_stiff);                      // new
-    if (err != cudaSuccess) throw std::runtime_error("cudaMemset d_stiff failed");
 
-    // Copy host → device
+    err = cudaMalloc(&d_y_final_all, bytes_final);
+    if (err != cudaSuccess) {
+        cudaFree(d_y0_all);
+        throw std::runtime_error(std::string("cudaMalloc d_y_final_all failed: ") +
+                                 cudaGetErrorString(err));
+    }
+
+    err = cudaMalloc(&d_query_times, bytes_queries);
+    if (err != cudaSuccess) {
+        cudaFree(d_y0_all);
+        cudaFree(d_y_final_all);
+        throw std::runtime_error(std::string("cudaMalloc d_query_times failed: ") +
+                                 cudaGetErrorString(err));
+    }
+
+    err = cudaMalloc(&d_dense_all, bytes_dense);
+    if (err != cudaSuccess) {
+        cudaFree(d_y0_all);
+        cudaFree(d_y_final_all);
+        cudaFree(d_query_times);
+        throw std::runtime_error(std::string("cudaMalloc d_dense_all failed: ") +
+                                 cudaGetErrorString(err));
+    }
+
+    err = cudaMalloc(&d_stiff, bytes_stiff);
+    if (err != cudaSuccess) {
+        cudaFree(d_y0_all);
+        cudaFree(d_y_final_all);
+        cudaFree(d_query_times);
+        cudaFree(d_dense_all);
+        throw std::runtime_error(std::string("cudaMalloc d_stiff failed: ") +
+                                 cudaGetErrorString(err));
+    }
+
+    err = cudaMemset(d_stiff, 0, bytes_stiff);
+    if (err != cudaSuccess) {
+        cudaFree(d_y0_all);
+        cudaFree(d_y_final_all);
+        cudaFree(d_query_times);
+        cudaFree(d_dense_all);
+        cudaFree(d_stiff);
+        throw std::runtime_error(std::string("cudaMemset d_stiff failed: ") +
+                                 cudaGetErrorString(err));
+    }
+
+    // ---- Copy host → device ----
     err = cudaMemcpy(d_y0_all, h_y0.data(), bytes_y0, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) throw std::runtime_error("cudaMemcpy to d_y0_all failed");
+    if (err != cudaSuccess) {
+        cudaFree(d_y0_all);
+        cudaFree(d_y_final_all);
+        cudaFree(d_query_times);
+        cudaFree(d_dense_all);
+        cudaFree(d_stiff);
+        throw std::runtime_error(std::string("cudaMemcpy to d_y0_all failed: ") +
+                                 cudaGetErrorString(err));
+    }
+
     err = cudaMemcpy(d_query_times, h_query_times.data(), bytes_queries, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) throw std::runtime_error("cudaMemcpy to d_query_times failed");
+    if (err != cudaSuccess) {
+        cudaFree(d_y0_all);
+        cudaFree(d_y_final_all);
+        cudaFree(d_query_times);
+        cudaFree(d_dense_all);
+        cudaFree(d_stiff);
+        throw std::runtime_error(std::string("cudaMemcpy to d_query_times failed: ") +
+                                 cudaGetErrorString(err));
+    }
 
     return std::make_tuple(
         d_y0_all, d_y_final_all,
         d_query_times, d_dense_all,
-        d_stiff,                
+        d_stiff,
         num_systems, num_queries
     );
 }
-// ───────── 2) Launch the RK45 kernel ─────────
-// Added to the main.cpp for launching the kernel
-
-// // ───────── 3) Copy back results & free GPU memory ─────────
-// //   We now also copy back the stiffness flags, gather which
-// //   systems are stiff, and invoke Radau only on those.
-// template<class Runoff5>
-// std::pair<FinalType, DenseType> retrieve_and_free(
-//     double* d_y0_all,
-//     double* d_y_final_all,
-//     double* d_query_times,
-//     double* d_dense_all,
-//     int*    d_stiff,           
-//     int     num_systems,
-//     int     num_queries,
-//     double  t0,
-//     double  tf,
-//     const typename Runoff5::SP_TYPE* d_sp
-// ) {
-//     constexpr int N_EQ = Runoff5::N_EQ;
-//     size_t bytes_final = sizeof(double) * num_systems * N_EQ;
-//     size_t bytes_dense = sizeof(double) * num_systems * N_EQ * num_queries;
-//     size_t bytes_stiff = sizeof(int)    * num_systems;           
-
-//     // 3a) Copy device → host for solution & stiffness flags
-//     FinalType h_y_final_all(num_systems * N_EQ);
-//     DenseType h_dense_raw(num_systems * N_EQ * num_queries);
-//     std::vector<int> h_stiff(num_systems);                        
-
-//     cudaMemcpy(h_y_final_all.data(), d_y_final_all, bytes_final,   cudaMemcpyDeviceToHost);
-//     cudaMemcpy(h_dense_raw.data(),    d_dense_all,    bytes_dense, cudaMemcpyDeviceToHost);
-//     cudaMemcpy(h_stiff.data(),        d_stiff,        bytes_stiff, cudaMemcpyDeviceToHost);  
-
-//     // Free stiffness‐flag array now
-//     cudaFree(d_stiff);
-
-//     // 3b) Determine which systems are stiff
-//     std::vector<int> stiff_idxs;
-//     for (int i = 0; i < num_systems; ++i) {
-//         if (h_stiff[i] != 0) {
-//             stiff_idxs.push_back(i);
-//         }
-//     }
-
-
-//     // 3c) Launch Radau‐only kernel on flagged systems
-//     if (!stiff_idxs.empty()) {
-//         int n_stiff = int(stiff_idxs.size());
-//         int* d_stiff_idxs = nullptr;
-//         cudaMalloc(&d_stiff_idxs, sizeof(int)*n_stiff);
-//         cudaMemcpy(d_stiff_idxs, stiff_idxs.data(), sizeof(int)*n_stiff, cudaMemcpyHostToDevice);
-
-//         // // Debug print
-//         // printf("Stiff systems:");
-//         // for (int id : stiff_idxs) printf(" %d", id);
-//         // printf("\n");
-
-//         constexpr int TPB = 128;
-//         int blocks2 = (n_stiff + TPB - 1) / TPB;
-//         radau_kernel_multi<Runoff5>
-//           <<< blocks2, TPB >>>(
-//             d_y0_all,        
-//             d_y_final_all,   
-//             d_query_times,    
-//             d_dense_all,      
-//             num_systems,     
-//             num_queries,     
-//             t0,              
-//             tf,               
-//             d_sp,            
-//             d_stiff_idxs,     
-//             n_stiff,           
-//             d_forc_data,
-//             nForc              
-//           );
-//         cudaDeviceSynchronize();
-//         // launch‐error check
-//         {
-//              cudaError_t err = cudaGetLastError();
-//              if (err != cudaSuccess) {
-//                  throw std::runtime_error(std::string("radau_kernel_multi launch failed: ")
-//                                           + cudaGetErrorString(err));
-//              }
-//          }
-//          // execution‐error check
-//          {
-//              cudaError_t err = cudaDeviceSynchronize();
-//              if (err != cudaSuccess) {
-//                  throw std::runtime_error(std::string("radau_kernel_multi execution failed: ")
-//                                           + cudaGetErrorString(err));
-                                                      
-//                 }
-//         }
-//         cudaFree(d_stiff_idxs);
-//     }
-
-//     // 3d) Free remaining device memory
-//     cudaFree(d_y0_all);
-//     cudaFree(d_y_final_all);
-//     cudaFree(d_query_times);
-//     cudaFree(d_dense_all);
-
-//     // 3e) Reorder raw dense output from [sys][comp][q] → [sys][q][comp]
-//     DenseType h_dense_all(num_systems * N_EQ * num_queries);
-//     for (int s = 0; s < num_systems; ++s) {
-//         for (int q = 0; q < num_queries; ++q) {
-//             for (int c = 0; c < N_EQ; ++c) {
-//                 int src = s * (N_EQ * num_queries)
-//                         + c * (num_queries)
-//                         + q;
-//                 int dst = (s * num_queries + q) * N_EQ + c;
-//                 h_dense_all[dst] = h_dense_raw[src];
-//             }
-//         }
-//     }
-
-//     return { std::move(h_y_final_all), std::move(h_dense_all) };
-// }
 
 template<class Runoff5>
 std::pair<FinalType, DenseType> retrieve_and_free(
     double* d_y0_all,
     double* d_y_final_all,
     double* d_query_times,
-    double* d_dense_all,
+    float*  d_dense_all,   // float dense on device
     int*    d_stiff,
     int     num_systems,
     int     num_queries,
-    double  t0,
-    double  tf,
-    const typename Runoff5::SP_TYPE* d_sp
+    double  /*t0*/,
+    double  /*tf*/,
+    const typename Runoff5::SP_TYPE* /*d_sp*/
 ) {
     constexpr int N_EQ = Runoff5::N_EQ;
-    size_t bytes_final = sizeof(double) * num_systems * N_EQ;
-    size_t bytes_dense = sizeof(double) * num_systems * N_EQ * num_queries;
-    size_t bytes_stiff = sizeof(int)    * num_systems;
-    size_t bytes_y0    = sizeof(double) * num_systems * N_EQ;  
 
-    // 3a) Copy device → host for solution & stiffness flags
-    FinalType      h_y_final_all(num_systems * N_EQ);
-    DenseType      h_dense_raw(num_systems * N_EQ * num_queries);
-    std::vector<int>   h_stiff(num_systems);
+    // ——————— Element counts (size_t) ———————————
+    const size_t y_elems     = size_t(num_systems) * size_t(N_EQ);
+    const size_t dense_elems = y_elems * size_t(num_queries);
+    const size_t stiff_elems = size_t(num_systems);
 
-    cudaMemcpy(h_y_final_all.data(), d_y_final_all, bytes_final,   cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_dense_raw.data(),    d_dense_all,    bytes_dense, cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_stiff.data(),        d_stiff,        bytes_stiff, cudaMemcpyDeviceToHost);
+    // Guard against overflow
+    if (num_systems > 0 && num_queries > 0) {
+        const size_t back = (dense_elems / size_t(N_EQ)) / size_t(num_queries);
+        if (back != size_t(num_systems)) {
+            throw std::runtime_error("Overflow computing dense_elems");
+        }
+    }
 
-    // ——————————————————————————————————————————————————————————
-    // Copy out the true y0 before we free it
-    std::vector<double> h_y0_all(num_systems * N_EQ);
-    cudaMemcpy(h_y0_all.data(), d_y0_all, bytes_y0, cudaMemcpyDeviceToHost);
-    // ——————————————————————————————————————————————————————————
+    // ——————— Byte sizes ————————————————————————
+    const size_t bytes_final = y_elems     * sizeof(double);
+    const size_t bytes_dense = dense_elems * sizeof(float);
+    const size_t bytes_stiff = stiff_elems * sizeof(int);
+    const size_t bytes_y0    = y_elems     * sizeof(double);
 
-    // Free the stiffness‐flag array
+    // ——————— Host buffers (size_t counts) ———————
+    FinalType           h_y_final_all(y_elems);    // vector<double>
+    DenseType           h_dense_raw(dense_elems);  // vector<float>
+    std::vector<int>    h_stiff(stiff_elems);
+    std::vector<double> h_y0_all(y_elems);
+
+    // ——————— Copy device → host —————————————————
+    auto ck = [](cudaError_t e, const char* where){
+        if (e != cudaSuccess) {
+            throw std::runtime_error(std::string(where) + ": " + cudaGetErrorString(e));
+        }
+    };
+
+    ck(cudaMemcpy(h_y_final_all.data(), d_y_final_all, bytes_final, cudaMemcpyDeviceToHost),
+       "cudaMemcpy y_final_all");
+    ck(cudaMemcpy(h_dense_raw.data(),    d_dense_all,  bytes_dense, cudaMemcpyDeviceToHost),
+       "cudaMemcpy dense_all");
+    ck(cudaMemcpy(h_stiff.data(),        d_stiff,      bytes_stiff, cudaMemcpyDeviceToHost),
+       "cudaMemcpy stiff");
+    ck(cudaMemcpy(h_y0_all.data(),       d_y0_all,     bytes_y0,    cudaMemcpyDeviceToHost),
+       "cudaMemcpy y0_all");
+
+    // ---- Free device memory ----
     cudaFree(d_stiff);
-
-    // —————— To use RADAU kernels ————————————————————————————————————————————
-    // Note: We are not using the RADAU kernels here, since during runoff process
-    //       the systems are not stiff and we are working with very high tolerance here. 
-    //       We will use them only in the next step - routing.
-    // 3b) figure out which systems are stiff…
-    // 3c) launch radau on them…
-
-    // 3d) Free the integrator buffers
     cudaFree(d_y0_all);
     cudaFree(d_y_final_all);
     cudaFree(d_query_times);
     cudaFree(d_dense_all);
 
-    // 3e) Reorder raw dense → [sys][q][comp]
-    // DenseType h_dense_all(num_systems * N_EQ * num_queries);
-    // for (int s = 0; s < num_systems; ++s) {
-    //   for (int q = 0; q < num_queries; ++q) {
-    //     for (int c = 0; c < N_EQ; ++c) {
-    //       int src = s * (N_EQ * num_queries)
-    //               + c * (num_queries)
-    //               + q;
-    //       int dst = (s * num_queries + q) * N_EQ + c;
-    //       h_dense_all[dst] = h_dense_raw[src];
-    //     }
-    //   }
-    // }
+    // Kernel already wrote dense as [sys][q][comp]; keep order
+    DenseType h_dense_all = std::move(h_dense_raw);
 
-    // No reordering needed, just move the data
-    DenseType h_dense_all = std::move(h_dense_raw); // [sys][q][comp]
-
-    // ——————————————————————————————————————————————————————————
-    // Overwrite the q=0 slice in h_dense_all with the true y0
+    // Overwrite q=0 with the true y0 values (cast to float)
     for (int s = 0; s < num_systems; ++s) {
-      for (int c = 0; c < N_EQ; ++c) {
-        int dst = (s * num_queries + /*q=*/0) * N_EQ + c;
-        h_dense_all[dst] = h_y0_all[s * N_EQ + c];
-      }
+        for (int c = 0; c < N_EQ; ++c) {
+            const size_t dst = (size_t(s) * size_t(num_queries) + size_t(0)) * size_t(N_EQ) + size_t(c);
+            h_dense_all[dst] = static_cast<float>(h_y0_all[size_t(s) * size_t(N_EQ) + size_t(c)]);
+        }
     }
-    // ——————————————————————————————————————————————————————————
 
     return { std::move(h_y_final_all),
              std::move(h_dense_all) };
 }
+
 
 
 } // namespace rk45_api
