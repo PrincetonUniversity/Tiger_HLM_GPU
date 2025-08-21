@@ -1,52 +1,53 @@
-// main.cpp
 // Standard Library Headers
-#include <cstdio>       // for printf, fprintf
-#include <cstdlib>      // for std::exit
-#include <cmath>        // for std::sqrt, std::pow, std::fabs
-#include <algorithm>    // for std::max, std::fmin, std::fmax
-#include <numeric>      // for std::iota
-#include <vector>       // for std::vector
-#include <array>        // for std::array
-#include <fstream>      // for std::ifstream, std::ofstream
-#include <iomanip>      // for std::setw, std::setprecision
-#include <utility>      // for std::tie
-#include <cstdint>      // for std::uint64_t, std::int64_t
-#include <stdexcept>    // for std::runtime_error
-#include <iostream>     // for std::cout, std::cerr
-#include <ctime>        // for std::tm, timegm
-#include <filesystem>   // for std::filesystem::path (used to get filename)
+#include <sstream>
+#include <string>
+#include <cstdio>       
+#include <cstdlib>      
+#include <cmath>        
+#include <algorithm>    
+#include <numeric>      
+#include <vector>       
+#include <array>        
+#include <fstream>      
+#include <iomanip>      
+#include <utility>      
+#include <cstdint>     
+#include <stdexcept>    
+#include <iostream>     
+#include <ctime>        
+#include <filesystem>   
+namespace fs = std::filesystem;  
 
 // CUDA & GPU Headers
-#include <cuda_runtime.h>           // CUDA runtime API
+#include <cuda_runtime.h>           
 
 // Project Core Headers
 #include "solver/rk45.h"                  // Runge-Kutta 4/5 core solver interface (host side)
-#include "solver/rk45_api.hpp"     // Host-side RK45 API: setup_gpu_buffers, launch_rk45_kernel, etc.
+#include "solver/rk45_api.hpp"            // Host-side RK45 API: setup_gpu_buffers, launch_rk45_kernel, etc.
 #include "solver/rk45_step_dense.cuh"     // Device kernel for one RK45 step + dense output
 #include "solver/radau_step_dense.cuh"    // Device kernel for Radau-IIA step + dense output
 #include "solver/radau_kernel.cuh"        // Radau-only kernel for specific model (e.g. Runoff5)
 #include "solver/small_lu.cuh"            // Small-matrix LU solver used by Radau (for implicit steps)
 #include "solver/event_detector.cuh"      // Event detection (e.g., slope jumps, stiffness) on device
-#include "simulation_driver.hpp"   // Simulation core loop (manages time stepping, control flow)
+#include "simulation_driver.hpp"          // Simulation core loop (manages time stepping, control flow)
 
 // Model & Parameters
-#include "models/model_Runoff5.hpp"           // Brings in SpatialParams and model-specific logic
-#include "models/model_registry.hpp"      // Registers models and parameters
-#include "stream.hpp"                     // Stream wrapper for simulation (manages model ID, initial state, etc.)
-#include "I_O/config_loader.hpp"              // Loads model configuration settings (e.g., from JSON)
-#include "I_O/parameters_loader.hpp"          // Loads parameters (e.g., spatial or physical) from CSV
+#include "models/model_Runoff5.hpp"     // SpatialParams and model-specific logic
+#include "models/model_registry.hpp"    // Registers models and parameters
+#include "stream.hpp"                   // Stream wrapper for simulation (manages model ID, initial state, etc.)
+#include "I_O/config_loader.hpp"        // Loads model configuration settings (e.g., from JSON)
+#include "I_O/parameters_loader.hpp"    // Loads parameters (e.g., spatial or physical) from CSV
 
 // Forcing & Input/Output
 #include "I_O/forcing_loader.hpp"  // Loads external forcing data from NetCDF and maps it
 #include "I_O/forcing_data.h"      // Provides forcing data structure
-#include "I_O/output_series.hpp"       // Serial output to NetCDF format
+#include "I_O/output_series.hpp"   // Serial output to NetCDF format
 
 // MPI & Timing Utilities
-#include <mpi.h>                   // MPI for parallel communication
-#include "chrono"                  // Timing utility (possibly custom or wrapper around std::chrono)
+#include <mpi.h>                   
+#include "chrono"                  
 
-// tell the compiler/linker about our new 2-arg solver-launch function
-SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc);
+
 
 // ───────── Global Variables ─────────
 double GLOBAL_QUERY_DT = 60.0;   // default output interval (minutes)
@@ -58,6 +59,96 @@ using rk45_api::retrieve_and_free;
 using Clock = std::chrono::high_resolution_clock;
 using TimePoint = std::chrono::time_point<Clock>;
 
+// Helper macros for CUDA error checking
+#define CUDA_CHECK(call)                                                      \
+  do {                                                                        \
+    cudaError_t err = (call);                                                 \
+    if (err != cudaSuccess) {                                                 \
+      std::fprintf(stderr,                                                    \
+        "[CUDA ERROR] %s:%d: “%s” failed → %s\n",                             \
+        __FILE__, __LINE__, #call, cudaGetErrorString(err));                  \
+      std::exit(1);                                                           \
+    }                                                                         \
+  } while(0)
+
+// Type alias for time points
+double elapsedSeconds(TimePoint start, TimePoint end) {
+    return std::chrono::duration<double>(end - start).count();
+}
+
+// Equal split helper: returns [start,end) for 'index' among 'parts'
+inline std::pair<int,int> split_equal(int total, int parts, int index) {
+    int base = total / parts;                 // floor
+    int rem  = total % parts;                 // first 'rem' chunks get one extra
+    int start = index * base + std::min(index, rem);
+    int count = base + (index < rem ? 1 : 0);
+    return {start, start + count};
+}
+
+// Sort SpatialParams by stream/system ID so slices are contiguous and reproducible
+inline void sort_by_stream(std::vector<SpatialParams>& v) {
+    std::sort(v.begin(), v.end(),
+              [](const SpatialParams& a, const SpatialParams& b){
+                  return a.stream < b.stream;
+              });
+}
+
+
+// check if the device has enough memory for the forcing data
+static void verifyDeviceForcingsHostSide(const NCForcing& chunk) {
+    // 1) Pull back the scalars/arrays from __constant__ to host and compare
+    int dev_nForc = -1;
+    CUDA_CHECK(cudaMemcpyFromSymbol(&dev_nForc, nForc, sizeof(int)));
+    if (dev_nForc != chunk.nForc) {
+        std::cerr << "[FORC-CHECK] nForc mismatch: host=" << chunk.nForc
+                  << " device=" << dev_nForc << "\n";
+    }
+
+    std::vector<double> dev_dt(chunk.nForc, -1.0);
+    std::vector<size_t> dev_nT(chunk.nForc, 0);
+    CUDA_CHECK(cudaMemcpyFromSymbol(dev_dt.data(), c_forc_dt, sizeof(double) * chunk.nForc));
+    CUDA_CHECK(cudaMemcpyFromSymbol(dev_nT.data(), c_forc_nT, sizeof(size_t) * chunk.nForc));
+
+    for (int f = 0; f < chunk.nForc; ++f) {
+        if (dev_dt[f] != chunk.dt[f] || dev_nT[f] != chunk.nT[f]) {
+            std::cerr << "[FORC-CHECK] meta mismatch f="<<f
+                      << " dt host="<<chunk.dt[f]<<" dev="<<dev_dt[f]
+                      << " nT host="<<chunk.nT[f]<<" dev="<<dev_nT[f] << "\n";
+        }
+    }
+
+    // 2) Pull back a few specific values from the big d_forc_data and compare
+    float* dptr = nullptr;
+    CUDA_CHECK(cudaMemcpyFromSymbol(&dptr, d_forc_data, sizeof(dptr)));
+
+    auto baseF = [&](int f) {
+        size_t base = 0;
+        for (int k = 0; k < f; ++k) base += chunk.nT[k] * (size_t)chunk.systems;
+        return base;
+    };
+
+    auto check_point = [&](int f, size_t t, size_t s) {
+        size_t idx = baseF(f) + t * (size_t)chunk.systems + s;
+        float hval = -999, dval = -999;
+        // host value
+        hval = chunk.h_data[idx];
+        // device value
+        CUDA_CHECK(cudaMemcpy(&dval, dptr + idx, sizeof(float), cudaMemcpyDeviceToHost));
+        if (!(std::isfinite(hval) && std::isfinite(dval)) || hval != dval) {
+            std::cerr << "[FORC-CHECK] value mismatch f="<<f<<" t="<<t<<" s="<<s
+                      << " host="<<hval<<" dev="<<dval<<" idx="<<idx<<"\n";
+        } else {
+            std::cout << "[FORC-CHECK] OK f="<<f<<" t="<<t<<" s="<<s<<" = "<<dval<<"\n";
+        }
+    };
+
+    // check a tiny set (safe even for 10M systems)
+    check_point(0, 0, 0);
+    if (chunk.nT[0] > 1) check_point(0, 1, 0);
+    if (chunk.nForc > 1) check_point(1, 0, 0);
+}
+
+
 // Parses ISO date string like "2019-12-25" or "2019-12-25T00:00:00Z"
 std::tm parseDate(const std::string& iso_date) {
     std::tm t{};
@@ -66,21 +157,6 @@ std::tm parseDate(const std::string& iso_date) {
     t.tm_mon -= 1;
     return t;
 }
-
-// Days in month for (Y, M)
-// int daysInMonth(int Y, int M) {
-//     static const int dm[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
-//     if (M == 2) return isLeapYear(Y) ? 29 : 28;
-//     return dm[M-1];
-// }
-
-// // Convert (year + 0-based day-of-year offset) -> (Y,M,D)
-// struct YMD { int Y, M, D; };
-// YMD ymdFromYearAndDayOffset(int year, int dayOffset) {
-//     int Y = year, M = 1, D = 1;
-//     advanceDate(Y, M, D, dayOffset);
-//     return {Y, M, D};
-// }
 
 // Compute days since Jan 1 of that year
 int computeDayOfYear(const std::tm& t) {
@@ -141,25 +217,10 @@ __global__ void checkForcingsOnDeviceSafe(const float* d_forc,
             }
         }
     }
-    printf("---------------------------------\n");
+    printf("─────────────────────────\n");
 }
 
-// Helper macros for CUDA error checking
-#define CUDA_CHECK(call)                                                      \
-  do {                                                                        \
-    cudaError_t err = (call);                                                 \
-    if (err != cudaSuccess) {                                                 \
-      std::fprintf(stderr,                                                    \
-        "[CUDA ERROR] %s:%d: “%s” failed → %s\n",                             \
-        __FILE__, __LINE__, #call, cudaGetErrorString(err));                  \
-      std::exit(1);                                                           \
-    }                                                                         \
-  } while(0)
 
-// Type alias for time points
-double elapsedSeconds(TimePoint start, TimePoint end) {
-    return std::chrono::duration<double>(end - start).count();
-}
 
 // ───────── Validate command-line arguments ─────────
 bool validateArgs(int argc) {
@@ -414,7 +475,8 @@ bool isLeapYear(int year) {
 
 
 // ───────── Loop over a single simulation year ─────────
-void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff5>>& streams) {
+void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff5>>& streams,
+                int rank, bool usingMPI) {
     
     // Initialize chunk start date
     int chunkStartYear = year, chunkStartMon = 1, chunkStartDay = 1;
@@ -466,7 +528,10 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
         int remainingDays = end_day - dayOffset + 1;
         int daysThisChunk = std::min(DAYS_PER_CHUNK, remainingDays);
 
-        simulateChunk(config, streams, year, dayOffset, daysThisChunk);
+        // simulateChunk(config, streams, year, dayOffset, daysThisChunk, rank, usingMPI);!!!
+        // Determine if this is the last chunk of the year → include tf sample
+        bool include_tf = (dayOffset + daysThisChunk - 1) == end_day;
+        simulateChunk(config, streams, year, dayOffset, daysThisChunk, rank, usingMPI, include_tf);
 
         // Advance date pointer for next chunk
         advanceDate(chunkStartYear, chunkStartMon, chunkStartDay, daysThisChunk);
@@ -475,74 +540,11 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
 }
 
 
-// void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff5>>& streams) {
-//     const int TOTAL_DAYS = isLeapYear(year) ? 366 : 365;
-//     const int num_systems = static_cast<int>(streams.size());
-
-//     // Parse full start and end dates
-//     std::tm start_tm = parseDate(config.time_start);
-//     std::tm end_tm   = parseDate(config.time_end);
-
-//     // Only simulate if this year overlaps with config window
-//     if (start_tm.tm_year + 1900 > year || end_tm.tm_year + 1900 < year)
-//         return;
-
-//     // Determine bounds within this year
-//     int start_day = (start_tm.tm_year + 1900 == year) ? computeDayOfYear(start_tm) : 0;
-//     int end_day   = (end_tm.tm_year + 1900 == year)   ? computeDayOfYear(end_tm)   : (TOTAL_DAYS - 1);
-
-//     printSimHeader(year, start_day, end_day, num_systems);
-
-//     // Memory cap in days based on 15 GiB limit
-//     const int memCapDays = std::max(1, computeDaysPerChunk(num_systems));
-
-//     // Optional user cap in days from YAML
-//     int userCapDays = -1;
-//     for (const auto& f : config.forcing_variables) {
-//         if (f.time_chunk_size > 0) {
-//             userCapDays = f.time_chunk_size;
-//             break;
-//         }
-//     }
-
-//     // Detect if we are in monthly file mode
-//     bool monthlyFiles = false;
-//     for (const auto& f : config.forcing_variables) {
-//         if (f.file.find("{month}") != std::string::npos) {
-//             monthlyFiles = true;
-//             break;
-//         }
-//     }
-
-//     // Loop over chunks
-//     for (int dayOffset = start_day; dayOffset <= end_day; ) {
-//         int remainingDays = end_day - dayOffset + 1;
-//         int daysThisChunk = remainingDays;
-
-//         if (monthlyFiles) {
-//             auto [Y, M, D] = ymdFromYearAndDayOffset(year, dayOffset);
-//             const int dim           = daysInMonth(Y, M);
-//             const int dayInMonth0   = D - 1;             // 0-based index
-//             const int daysLeftMonth = dim - dayInMonth0; // incl. today
-//             daysThisChunk = std::min(daysThisChunk, daysLeftMonth);
-//         }
-
-//         // Apply memory and user caps
-//         daysThisChunk = std::min(daysThisChunk, memCapDays);
-//         if (userCapDays > 0) {
-//             daysThisChunk = std::min(daysThisChunk, userCapDays);
-//         }
-
-//         simulateChunk(config, streams, year, dayOffset, daysThisChunk);
-//         dayOffset += daysThisChunk;
-//     }
-// }
-
 // ───────── Dynamically compute how many days per chunk fit in memory ─────────
 int computeDaysPerChunk(int num_systems) {
     constexpr std::uint64_t MAX_BYTES = 15ULL * 1024 * 1024 * 1024; // 15 GiB limit
     int N_EQ = Runoff5::N_EQ;
-    double max_chunk_days = (double(MAX_BYTES) / (8.0 * N_EQ * num_systems) - 1.0) / 24.0; // double
+    double max_chunk_days = (double(MAX_BYTES) / (4.0 * N_EQ * num_systems) - 1.0) / 24.0; // double
     int DAYS_PER_CHUNK = std::max(1, int(std::floor(max_chunk_days)));
 
     return DAYS_PER_CHUNK;
@@ -553,7 +555,9 @@ void simulateChunk(const ModelConfig& config,
                    std::vector<Stream<Runoff5>>& streams,
                    int simYear,
                    int dayOffset,
-                   int daysThisChunk) {
+                   int daysThisChunk,
+                   int rank, bool usingMPI,
+                   bool include_tf) {
     int num_systems = streams.size();
 
     // Log date range per chunk
@@ -569,6 +573,7 @@ void simulateChunk(const ModelConfig& config,
 
 
     // ───────── Load forcing data for this chunk ─────────
+    TimePoint t_input_start = Clock::now();
     NCForcing forcingChunk = loadForcingData(config, simYear, dayOffset, daysThisChunk, num_systems, streams);
 
     // ───── DEBUG: Print SpatialParams for system s=0 ─────
@@ -585,6 +590,9 @@ void simulateChunk(const ModelConfig& config,
     
     // ───────── Copy forcings to device ─────────
     uploadForcingsToGpu(forcingChunk);
+    verifyDeviceForcingsHostSide(forcingChunk);   // round-trip check!!!
+    TimePoint t_input_end = Clock::now();
+    logTimer("Input", elapsedSeconds(t_input_start, t_input_end));
 
     // DEBUG: print first 3 precipitation & t2m values for system 0
     // std::cout << "[DEBUG-FORC] first 3 pr/t2m at sys=0:\n";
@@ -615,9 +623,8 @@ void simulateChunk(const ModelConfig& config,
     //                                 forcingChunk.h_data.size());
     // CUDA_CHECK(cudaDeviceSynchronize());
 
-
     // ───────── Prepare solver input arrays ─────────
-    SolverInputs solverInputs = prepareSolverInputs(simYear, dayOffset, daysThisChunk, streams);
+    SolverInputs solverInputs = prepareSolverInputs(simYear, dayOffset, daysThisChunk, streams, include_tf);
 
     // ───────── Launch ODE solver on GPU ─────────
     TimePoint t_solver_start = Clock::now();
@@ -626,12 +633,11 @@ void simulateChunk(const ModelConfig& config,
     TimePoint t_solver_end = Clock::now();
     logTimer("Solver runtime", elapsedSeconds(t_solver_start, t_solver_end));
 
-
     // ───────── Retrieve results and handle outputs ─────────
     TimePoint t_output_start = Clock::now();
-    handleSolverOutputs(config, simYear, dayOffset, daysThisChunk, solverInputs, solverOutputs, streams);
+    handleSolverOutputs(config, simYear, dayOffset, daysThisChunk, solverInputs, solverOutputs, streams, rank, usingMPI);
     TimePoint t_output_end = Clock::now();
-    std::cout << "[TIMER] Output writing took "
+    std::cout << "[TIMER] Output writing took:"
             << elapsedSeconds(t_output_start, t_output_end) << " seconds\n";
 }
 
@@ -642,18 +648,102 @@ NCForcing loadForcingData(const ModelConfig& config,
                           int daysThisChunk,
                           int num_systems,
                           const std::vector<Stream<Runoff5>>& streams) {
+    // Compute absolute dates for this chunk
+    int Ys = simYear, Ms = 1, Ds = 1;
+    advanceDate(Ys, Ms, Ds, dayOffset);
+    int Ye = Ys, Me = Ms, De = Ds;
+    advanceDate(Ye, Me, De, daysThisChunk - 1);
+
     std::vector<ForcingEntry> forcings;
+    forcings.reserve(config.forcing_variables.size());
+
     for (const auto& f : config.forcing_variables) {
-        double dt_hr = (f.time_resolution == "1h") ? 1.0 :
-                       (f.time_resolution == "24h") ? 24.0 :
-                       throw std::runtime_error("Unsupported resolution: " + f.time_resolution);
+        const double dt_hr =
+            (f.time_resolution == "1h")  ? 1.0 :
+            (f.time_resolution == "24h") ? 24.0 :
+            throw std::runtime_error("Unsupported resolution: " + f.time_resolution);
 
-        std::string file = f.file;
-        size_t pos = file.find("{year}");
-        if (pos != std::string::npos)
-            file.replace(pos, 6, std::to_string(simYear));
+        if (!f.ranged_by_name) {
+            // YEARLY mode → single file with {year} replacement
+            std::string file = f.file;
+            if (auto pos = file.find("{year}"); pos != std::string::npos) {
+                file.replace(pos, 6, std::to_string(simYear));
+            }
+            forcings.push_back(ForcingEntry{
+                /*files=*/{ config.forcings_path + file },
+                /*var_name=*/f.var_name,
+                /*dt_hours=*/dt_hr,
+                /*dims_time=*/f.dims_time,
+                /*dims_lat=*/f.dims_lat,
+                /*dims_lon=*/f.dims_lon
+            });
+            continue;
+        }
 
-        forcings.push_back({ config.forcings_path + file, f.var_name, dt_hr });
+        // RANGED mode
+        std::vector<std::string> files;
+
+        // Option 1: explicit list (if your YAML provided it)
+        if (!f.files.empty()) {
+            files.reserve(f.files.size());
+            for (const auto& p : f.files) {
+                // allow absolute or relative under forcings_path
+                if (!p.empty() && (p[0] == '/' || (p.size() > 1 && p[1] == ':'))) {
+                    files.push_back(p);
+                } else {
+                    files.push_back(config.forcings_path + p);
+                }
+            }
+        }
+        // Option 2: file_pattern with {start}_{end} inside (pick overlapping files from a dir)
+        else if (!f.file_pattern.empty()) {
+            // Split the pattern into <prefix>{start}_{end}<suffix>
+            const std::string& pat = f.file_pattern;
+            auto startPos = pat.find("{start}");
+            auto endPos   = pat.find("{end}");
+            if (startPos == std::string::npos || endPos == std::string::npos || endPos < startPos) {
+                throw std::runtime_error("file_pattern must contain {start}_{end}: " + pat);
+            }
+
+            // Expect "...{start}_{end}..." (literally an underscore between them in real filenames)
+            std::string prefix = pat.substr(0, startPos);
+            // skip "{start}" and the following "_" (we’ll rely on date parser to find YYYYMMDD_YYYYMMDD)
+            std::string suffix = pat.substr(endPos + std::string("{end}").size());
+
+            // Choose a directory to scan. We’ll scan config.forcings_path / prefix’s directory.
+            fs::path dir = fs::path(config.forcings_path) / fs::path(prefix).parent_path();
+
+            // Reduce prefix/suffix to just the filename part used for matching
+            std::string fnPrefix = fs::path(prefix).filename().string();
+            std::string fnSuffix = fs::path(suffix).filename().string();
+
+            // Ask the helper to pick files in that directory whose name contains YYYYMMDD_YYYYMMDD and overlaps chunk
+            auto picked = select_ranged_files_overlapping(dir, fnPrefix, fnSuffix, Ys, Ms, Ds, Ye, Me, De);
+            if (picked.empty()) {
+                std::ostringstream oss;
+                oss << "No ranged files picked for variable '" << f.name
+                    << "' in " << dir.string()
+                    << " overlapping " << formatDate(Ys,Ms,Ds) << "-" << formatDate(Ye,Me,De);
+                throw std::runtime_error(oss.str());
+            }
+            files = std::move(picked);
+        } else {
+            throw std::runtime_error(
+                "Ranged forcing '" + f.name + "' needs either 'files' or 'file_pattern'.");
+        }
+
+        std::cout << "[FORCING PICK] " << f.var_name << " files for "
+                  << formatDate(Ys,Ms,Ds) << "-" << formatDate(Ye,Me,De) << ":\n";
+        for (auto& p : files) std::cout << "   - " << p << "\n";
+
+        forcings.push_back(ForcingEntry{
+            /*files=*/std::move(files),
+            /*var_name=*/f.var_name,
+            /*dt_hours=*/dt_hr,
+            /*dims_time=*/f.dims_time,
+            /*dims_lat=*/f.dims_lat,
+            /*dims_lon=*/f.dims_lon
+        });
     }
 
     NCForcing chunk;
@@ -662,91 +752,25 @@ NCForcing loadForcingData(const ModelConfig& config,
     chunk.offset  = dayOffset;
     chunk.systems = num_systems;
 
-    // Initialize mapper
+    // store absolute date range (used by NCForcing::loadData)
+    chunk.Ys = Ys; chunk.Ms = Ms; chunk.Ds = Ds;
+    chunk.Ye = Ye; chunk.Me = Me; chunk.De = De;
+
+    // mapper
     std::string mapperFile = config.forcing_mappings_path + "/" + config.forcing_mappings[0].file;
     chunk.mapper = LookupMapper(mapperFile);
-
     if (!chunk.mapper.load()) {
         throw std::runtime_error("Failed to load stream → lat/lon mapping");
     }
 
-    // Fill system IDs
+    // system IDs
     chunk.systemIds.resize(num_systems);
-    for (size_t i = 0; i < num_systems; ++i) {
-        chunk.systemIds[i] = streams[i].sp.stream; // assuming SpatialParams.stream is stream ID
+    for (size_t i = 0; i < static_cast<size_t>(num_systems); ++i) {
+        chunk.systemIds[i] = streams[i].sp.stream;
     }
 
     return chunk;
 }
-
-
-// NCForcing loadForcingData(const ModelConfig& config,
-//                           int simYear,
-//                           int dayOffset,
-//                           int daysThisChunk,
-//                           int num_systems,
-//                           const std::vector<Stream<Runoff5>>& streams) {
-//     // Decide if monthly mode
-//     bool monthly = false;
-//     if (!config.forcing_variables.empty()) {
-//         monthly = (config.forcing_variables[0].file.find("{month}") != std::string::npos);
-//     }
-
-//     // Calendar date of this chunk's first day
-//     int Y = simYear, M = 1, D = 1;
-//     if (monthly) {
-//         auto ymd = ymdFromYearAndDayOffset(simYear, dayOffset);
-//         Y = ymd.Y;
-//         M = ymd.M;
-//         D = ymd.D;
-//     }
-
-//     std::vector<ForcingEntry> forcings;
-//     forcings.reserve(config.forcing_variables.size());
-//     for (const auto& f : config.forcing_variables) {
-//         double dt_hr = (f.time_resolution == "1h") ? 1.0 :
-//                        (f.time_resolution == "24h") ? 24.0 :
-//                        throw std::runtime_error("Unsupported resolution: " + f.time_resolution);
-
-//         std::string file = f.file;
-
-//         // Replace placeholders
-//         if (auto pos = file.find("{year}"); pos != std::string::npos) {
-//             file.replace(pos, 6, std::to_string(Y));
-//         }
-//         if (monthly) {
-//             if (auto pos = file.find("{month}"); pos != std::string::npos) {
-//                 char mm[3];
-//                 std::snprintf(mm, sizeof(mm), "%02d", M);
-//                 file.replace(pos, 7, mm); // zero-padded month
-//             }
-//         }
-
-//         forcings.push_back({ config.forcings_path + file, f.var_name, dt_hr });
-//     }
-
-//     NCForcing chunk;
-//     chunk.entries = std::move(forcings);
-//     chunk.days    = daysThisChunk;
-//     chunk.offset  = monthly ? (D - 1) : dayOffset; // day-of-month vs day-of-year
-//     chunk.systems = num_systems;
-
-//     // Initialize mapper
-//     std::string mapperFile = config.forcing_mappings_path + "/" + config.forcing_mappings[0].file;
-//     chunk.mapper = LookupMapper(mapperFile);
-//     if (!chunk.mapper.load()) {
-//         throw std::runtime_error("Failed to load stream → lat/lon mapping");
-//     }
-
-//     // Fill system IDs
-//     chunk.systemIds.resize(num_systems);
-//     for (size_t i = 0; i < num_systems; ++i) {
-//         chunk.systemIds[i] = streams[i].sp.stream;
-//     }
-
-//     return chunk;
-// }
-
 
 
 // ───────── Upload forcing data to device and copy pointer + metadata to device symbols
@@ -795,7 +819,8 @@ void uploadForcingsToGpu(NCForcing& chunk) {
 SolverInputs prepareSolverInputs(int simYear,
                                   int dayOffset,
                                   int daysThisChunk,
-                                  const std::vector<Stream<Runoff5>>& streams) {
+                                  const std::vector<Stream<Runoff5>>& streams,
+                                  bool include_tf) {
     SolverInputs input;
     int N_EQ = Runoff5::N_EQ;
     int num_systems = streams.size();
@@ -814,8 +839,17 @@ SolverInputs prepareSolverInputs(int simYear,
 
 
     // Define query times using GLOBAL_QUERY_DT
-    for (double m = input.t0; m <= input.tf; m += GLOBAL_QUERY_DT)
+    // for (double m = input.t0; m <= input.tf; m += GLOBAL_QUERY_DT)
+    //     input.h_query_times.push_back(m);!!!
+
+    // push times up to (but not including) tf
+    for (double m = input.t0; m < input.tf - 1e-9; m += GLOBAL_QUERY_DT)
         input.h_query_times.push_back(m);
+    
+    // If include_tf is true, add the final time point
+    if (include_tf) {
+        input.h_query_times.push_back(input.tf);
+    }
 
 
     return input;
@@ -842,14 +876,10 @@ SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc) {
     out.num_systems   = sys_count;
     out.num_queries   = query_count;
 
-
-    // CUDA_CHECK(cudaMemset(out.d_dense_all, 0xAB,
-    //                   num_systems * Runoff5::N_EQ * num_queries * sizeof(double)));
-
     // Compute dense buffer size safely (use size_t to avoid 32-bit overflow)
     const size_t dense_elems =
         size_t(out.num_systems) * size_t(Runoff5::N_EQ) * size_t(out.num_queries);
-    const size_t dense_bytes = dense_elems * sizeof(double);
+    const size_t dense_bytes = dense_elems * sizeof(float); // Use float for dense output
 
     // Optional paranoid overflow guard:
     if (out.num_systems > 0 && out.num_queries > 0) {
@@ -904,7 +934,8 @@ void handleSolverOutputs(const ModelConfig& config,
                          int daysThisChunk,
                          const SolverInputs& input,
                          const SolverOutputs& output,
-                         std::vector<Stream<Runoff5>>& streams) {
+                         std::vector<Stream<Runoff5>>& streams,
+                         int rank, bool usingMPI) {
     const int N_EQ = Runoff5::N_EQ;
     const int ns   = output.num_systems;
     const int nq   = output.num_queries;
@@ -943,11 +974,13 @@ void handleSolverOutputs(const ModelConfig& config,
     std::string sDate = formatDate(Y, M, D);
     advanceDate(Y, M, D, daysThisChunk - 1);
     std::string eDate = formatDate(Y, M, D);
-    // std::string prefix = std::to_string(simYear) + "_";
+    // Append rank only when running with MPI
+    std::string rank_tag = usingMPI ? ("_rank" + std::to_string(rank)) : "";
+    // Construct output file paths
+    std::string final_file    = config.output_path + "/final_"   + sDate + "_" + eDate + rank_tag + ".nc";
+    std::string dense_file    = config.output_path + "/dense_"   + sDate + "_" + eDate + rank_tag + ".nc";
+    std::string runoff_file   = config.output_path + "/runoff_"  + sDate + "_" + eDate + rank_tag + ".nc";
 
-    std::string final_file    = config.output_path + "/final_"   + sDate + "_" + eDate + ".nc";
-    std::string dense_file    = config.output_path + "/dense_"   + sDate + "_" + eDate + ".nc";
-    std::string runoff_file   = config.output_path + "/runoff_"  + sDate + "_" + eDate + ".nc";
 
     // Prepare metadata arrays
     std::vector<uint32_t> link_ids(ns);
@@ -1000,7 +1033,9 @@ void handleSolverOutputs(const ModelConfig& config,
 
 
 
-    std::cout << "[DONE] Outputs written for " << ns << " systems × " << nq << " time steps\n";
+    //std::cout << "[DONE] Outputs written for " << ns << " systems × " << nq << " time steps\n";
+    std::cout << "[DONE] Rank " << rank << ": Outputs written for "
+          << ns << " systems × " << nq << " time steps\n";
 
     // ───── DEBUG: Final state for s=0 after the chunk ─────
     // std::cout << "[DEBUG OUTPUT] Final state for s=0 after last time step:\n";
@@ -1159,80 +1194,67 @@ int main(int argc, char** argv) {
 
     int rank = 0, size = 1;
 
-    // Initialize MPI if enabled
-    if (usingMPI) {
-        MPI_Init(&argc, &argv);
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);  // Get this rank's ID
-        MPI_Comm_size(MPI_COMM_WORLD, &size);  // Total number of ranks
-    }
 
-    // Assign GPU device based on rank (round-robin if multiple ranks)
-    int gpuCount = getGpuCount();
-    assignGpuDevice(rank, gpuCount);
+// Initialize MPI if enabled
+if (usingMPI) {
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+}
 
-    std::vector<SpatialParams> spatialParams;
+// Assign GPU for this rank (Slurm sets CUDA_VISIBLE_DEVICES; usually 1 visible per rank)
+int gpuCount = getGpuCount();
+assignGpuDevice(rank, gpuCount);
 
-    // Handle size==1 with use_mpi: true (treat like serial)
-    if (usingMPI && size == 1) {
-        std::cout << "[INFO] MPI requested but only 1 process detected; "
-                    "running in single-rank mode.\n";
-        usingMPI = false; // fall through to serial path below
-    }
+std::vector<SpatialParams> spatialParams;
 
-    
-    if (usingMPI && size > 1 && rank == 0) { 
-        // Root rank loads and distributes SpatialParams to workers
-        std::cout << "[RANK 0] Acting as coordinator only\n";
-        distributeSpatialParams(config, size);
-        // Early exit: rank 0 is just a coordinator/distributor
-        MPI_Finalize();
-        return 0;
-    }
+if (!usingMPI) {
+    // ---- SERIAL: load all, run on one GPU ----
+    spatialParams = loadSpatialParams(config.parameters_path + config.spatially_varying_file);
+} else {
+    // ---- MPI: ALL RANKS COMPUTE (equal split by stream ID) ----
+    // 1) Every rank loads the same CSV from shared FS (simple & robust)
+    std::vector<SpatialParams> all =
+        loadSpatialParams(config.parameters_path + config.spatially_varying_file);
 
-    if (usingMPI && rank >= 1 && rank < size) {
-        // Non-root ranks receive their assigned SpatialParams
-        spatialParams = receiveSpatialParams();
-    } else if (!usingMPI) {
-        // Serial mode: load all parameters directly
-        spatialParams = loadSpatialParams(config.parameters_path + config.spatially_varying_file);
-    }
+    // 2) Sort once by stream/system ID for clean contiguous partitions
+    sort_by_stream(all);
 
-    if (!config.constant_parameters_index.empty()) {
-        for (auto &sp : spatialParams) {
-            for (size_t i = 0; i < config.constant_parameters_index.size(); ++i) {
-                int idx = config.constant_parameters_index[i];
-                double v = config.constant_parameters_values[i];
+    // 3) Equal whole-number split across 'size' ranks
+    auto [s, e] = split_equal(static_cast<int>(all.size()), size, rank);
+    spatialParams.assign(all.begin() + s, all.begin() + e);
 
-                switch (idx) {
-                    case 0:  sp.c1     = v;  break;  // example: override c1
-                    case 1:  sp.Hu     = v;  break;  // override Hu
-                    case 2:  sp.infil  = v;  break;  // override infiltration rate
-                    case 3:  sp.perco  = v;  break;  // override percolation rate
-                    // … add further cases to map index → the correct SpatialParams field …
-                    default:
-                        std::cerr << "Warning: constant_param idx="<<idx
-                                <<" not recognized\n";
-                }
+    std::cout << "[MPI] rank " << rank << "/" << size
+              << " handling " << spatialParams.size()
+              << " systems (rows " << s << " .. " << (e ? e-1 : 0) << ")\n";
+}
+
+// Apply constant overrides
+if (!config.constant_parameters_index.empty()) {
+    for (auto &sp : spatialParams) {
+        for (size_t i = 0; i < config.constant_parameters_index.size(); ++i) {
+            int idx = config.constant_parameters_index[i];
+            double v = config.constant_parameters_values[i];
+            switch (idx) {
+                case 0:  sp.c1    = v; break;
+                case 1:  sp.Hu    = v; break;
+                case 2:  sp.infil = v; break;
+                case 3:  sp.perco = v; break;
+                default: std::cerr << "Warning: unknown const idx="<<idx<<"\n";
             }
         }
     }
-
-    // Build stream objects for each spatial unit (each ODE system)
-    auto streams = buildStreams(spatialParams);
-
-    // Upload SpatialParams to GPU and set global device pointer
-    setupGpu(spatialParams, streams);
-
-    // Run simulations year by year
-    for (int simYear = startYear(config); simYear <= endYear(config); ++simYear) {
-        simulateYear(simYear, config, streams);
-    }
-
-    // Finalize MPI (if used)
-    if (usingMPI) {
-        MPI_Finalize();
-    }
-
-    return 0;
 }
 
+// Build, upload, run simulation
+auto streams = buildStreams(spatialParams);
+setupGpu(spatialParams, streams);
+for (int simYear = startYear(config); simYear <= endYear(config); ++simYear) {
+    simulateYear(simYear, config, streams, rank, usingMPI);
+}
+
+if (usingMPI) {
+    MPI_Finalize();
+}
+return 0;
+}
