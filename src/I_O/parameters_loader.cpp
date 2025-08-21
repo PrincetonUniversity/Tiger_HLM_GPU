@@ -1,4 +1,3 @@
-// I_O/parameters_loader.cpp
 #include "parameters_loader.hpp"
 #include <fstream>
 #include <sstream>
@@ -33,7 +32,7 @@ std::vector<SpatialParams> loadSpatialParams(const std::string& csv_path) {
 
     // Required columns: match CSV's names
     const std::vector<std::string> required = {
-        "stream", // "next_stream",
+        "stream",                 // "next_stream",
         "i2", "i3",               // infiltration/percolation fractions
         "hu",                     // → SpatialParams::Hu
         "centroid_lon",           // → SpatialParams::lon
@@ -120,8 +119,8 @@ std::vector<SpatialParams> loadSpatialParams(const std::string& csv_path) {
         p.melt_f = p.melt_f *(1/(24*60.0))*(1/1000.0);  // mm/day/degree to m/min/degree
 
         // convert units
-        p.Hu  = p.Hu / 1000.0; // convert Hu from mm to m
-        p.L   = p.L * 1000;   // length of channel [km] -> [m]
+        p.Hu  = p.Hu / 1000.0;   // convert Hu from mm to m
+        p.L   = p.L * 1000;      // length of channel [km] -> [m]
         p.A_h = p.A_h * 1000000; // area of hillslopes in [km²] -> [m²]
 
         out.push_back(p);
