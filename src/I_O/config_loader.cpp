@@ -534,6 +534,13 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     
     // Load flags
     config.use_mpi = parser.getBool("flags.use_mpi", false);
+    config.max_gpu_mem_gb     = parser.getDouble("flags.max_gpu_mem_gb", 15.0); // Default to 15 GiB
+    config.gpu_mem_buffer_pct = parser.getDouble("flags.gpu_mem_buffer_pct", 15.0); // Default to 15%
+    if (config.max_gpu_mem_gb <= 0.0) {
+        throw std::runtime_error(
+            "You must set flags.max_gpu_mem_gb > 0 in your config YAML (GiB)."
+        );
+    }
     
     return config;
 }

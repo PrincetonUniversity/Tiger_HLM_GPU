@@ -89,6 +89,8 @@ struct ModelConfig {
     
     // Flags
     bool use_mpi;  // Use MPI for parallel execution
+    double max_gpu_mem_gb;       // GPU memory budget (GiB)
+    double gpu_mem_buffer_pct;   // Reserve percentage of GPU memory for overhead
 };
 
 // Simple YAML parser class
