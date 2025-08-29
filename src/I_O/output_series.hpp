@@ -94,3 +94,23 @@ void write_selected_dense_netcdf(const std::string& filename,
                                  int                full_N_EQ,
                                  const std::string& time_origin); // e.g., "2023-01-01T00:00:00Z" passed from the user
                             
+/**
+ * @brief Load initial model state from a 2D NetCDF file written by write_final_netcdf.
+ *
+ * Expects a dataset with:
+ *   dimensions: system, variable
+ *   variables:
+ *     - system(system)   : int / int64 / uint32 (LinkID)
+ *     - variable(variable): int (state index, unused except for size check)
+ *     - outputs(system, variable): float or double (final state values)
+ *
+ * This function maps each stream's LinkID to the corresponding row in 'outputs'
+ * and writes the values into streams[s].y0[*] for hot-starting.
+ *
+ * @param path     Path to the final.nc file (e.g., ".../final_20190101_20190131.nc").
+ * @param streams  Vector of Stream<Runoff5> whose y0 will be populated in-place.
+ */
+void load_initial_from_final_nc_serial(
+    const std::string& path,
+    std::vector<Stream<Runoff5>>& streams
+);
