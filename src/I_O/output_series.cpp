@@ -8,17 +8,6 @@
 #include "stream.hpp"                   // for Runoff5
 #include <unordered_map>                // for LookupMapper
 
-#ifndef NC_CHECK
-#define NC_CHECK(call) \
-    do { \
-        int status = (call); \
-        if (status != NC_NOERR) { \
-            std::cerr << "NetCDF error: " << nc_strerror(status) \
-                      << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
-            std::exit(1); \
-        } \
-    } while (0)
-#endif
 
 #define NC_CHECK(call) \
     do { \
@@ -288,6 +277,17 @@ void write_selected_dense_netcdf(const std::string& filename,
     NC_CHECK(nc_close(ncid));
 }
 
+// Making sure NC_CHECK is defined as the fatal variant for loader
+#undef NC_CHECK
+#define NC_CHECK(call) \
+    do { \
+        int status = (call); \
+        if (status != NC_NOERR) { \
+            std::cerr << "NetCDF error: " << nc_strerror(status) \
+                      << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+            std::exit(1); \
+        } \
+    } while (0)
 
 // Reads 2D (system, variable) 'outputs' from final.nc and fills streams[].y0
 void load_initial_from_final_nc_serial(const std::string& path,
