@@ -245,13 +245,16 @@ void printSimHeader(int year, int startDay, int endDay, int numSystems) {
 }
 
 void logInfo(const std::string& msg) {
-    // Log general information messages
-    std::cout << "[INFO]  " << msg << "\n";
+    std::cout << "[INFO] " << msg << "\n";
 }
 
 void logGpu(const std::string& msg) {
-    //  // Log GPU-specific messages
-    std::cout << "[GPU]   " << msg << "\n";
+    std::istringstream iss(msg);   
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back(); 
+        std::cout << "[GPU] " << line << "\n";
+    }
 }
 
 void logTimer(const std::string& label, double seconds) {
@@ -262,12 +265,10 @@ void logTimer(const std::string& label, double seconds) {
 }
 
 void logWrite(const std::string& file) {
-   
     std::cout << "[WRITE] " << file << "\n";
 }
 
 void logDone(int systems, int queries) {
-    // Log that outputs have been written
     std::cout << "[DONE]  Outputs written (" 
               << systems << " × " << queries << ")\n";
     printSeparator();
@@ -495,7 +496,7 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
     int start_day = (start_tm.tm_year + 1900 == year) ? computeDayOfYear(start_tm) : 0;
     int end_day   = (end_tm.tm_year + 1900 == year)   ? computeDayOfYear(end_tm)   : (TOTAL_DAYS - 1);
 
-    // int DAYS_PER_CHUNK = computeDaysPerChunk(num_systems);
+    // Determine chunk size (days per chunk)
     int DAYS_PER_CHUNK = -1;
 
     // Print simulation header
@@ -511,7 +512,7 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
 
     // Fallback to auto-compute
     if (DAYS_PER_CHUNK <= 0) {
-        DAYS_PER_CHUNK = computeDaysPerChunk(num_systems);
+        DAYS_PER_CHUNK = computeDaysPerChunk(num_systems, config);
         std::cout << "[INFO] Using computed DAYS_PER_CHUNK = "
                 << DAYS_PER_CHUNK << "\n";
     } else {
@@ -541,14 +542,47 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
 
 
 // ───────── Dynamically compute how many days per chunk fit in memory ─────────
-int computeDaysPerChunk(int num_systems) {
-    constexpr std::uint64_t MAX_BYTES = 15ULL * 1024 * 1024 * 1024; // 15 GiB limit
-    int N_EQ = Runoff5::N_EQ;
-    double max_chunk_days = (double(MAX_BYTES) / (4.0 * N_EQ * num_systems) - 1.0) / 24.0; // double
-    int DAYS_PER_CHUNK = std::max(1, int(std::floor(max_chunk_days)));
+// int computeDaysPerChunk(int num_systems) {
+//     constexpr std::uint64_t MAX_BYTES = 30ULL * 1024 * 1024 * 1024; // 15 GiB limit!!!
+//     int N_EQ = Runoff5::N_EQ;
+//     double max_chunk_days = (double(MAX_BYTES) / (4.0 * N_EQ * num_systems) - 1.0) / 24.0; // double
+//     int DAYS_PER_CHUNK = std::max(1, int(std::floor(max_chunk_days)));
 
-    return DAYS_PER_CHUNK;
+//     return DAYS_PER_CHUNK;
+// }
+int computeDaysPerChunk(int num_systems, const ModelConfig& config) {
+    const double usable_bytes =
+        config.max_gpu_mem_gb *
+        (1.0 - config.gpu_mem_buffer_pct / 100.0) *
+        1024.0 * 1024.0 * 1024.0;
+
+    const int N_EQ = Runoff5::N_EQ;
+    double max_chunk_days =
+        (usable_bytes / (4.0 * N_EQ * num_systems) - 1.0) / 24.0;
+
+    int days = std::max(1, static_cast<int>(std::floor(max_chunk_days)));
+
+    // ---- Logging ----
+    // std::ostringstream oss;
+    // oss << std::fixed << std::setprecision(2)
+    //     << "[GPU] Total memory = " << config.max_gpu_mem_gb << " GiB\n"
+    //     << "[GPU] Buffer reserved = " << config.gpu_mem_buffer_pct << "%\n"
+    //     << "[GPU] Usable memory = "
+    //     << (usable_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB\n"
+    //     << "[GPU] Estimated DAYS_PER_CHUNK = " << days;
+    // logGpu(oss.str());
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2)
+        << "Total memory = " << config.max_gpu_mem_gb << " GiB\n"
+        << "Buffer reserved = " << config.gpu_mem_buffer_pct << "%\n"
+        << "Usable memory = "
+        << (usable_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB\n"
+        << "Estimated DAYS_PER_CHUNK = " << days;
+    logGpu(oss.str());
+
+    return days;
 }
+
 
 // ───────── Simulate a chunk of days within a year ─────────
 void simulateChunk(const ModelConfig& config,
@@ -776,21 +810,32 @@ NCForcing loadForcingData(const ModelConfig& config,
 // ───────── Upload forcing data to device and copy pointer + metadata to device symbols
 void uploadForcingsToGpu(NCForcing& chunk) {
     // Load the actual values from NetCDF using the paths in NCForcing
-    chunk.loadData();  // Assume this allocates & populates: chunk.h_data
+    chunk.loadData();  // populates chunk.h_data, dt, nT, nForc, etc.
     if (chunk.h_data.empty()) {
         throw std::runtime_error("No forcing data loaded for this chunk");
     }
 
+    // --- Make absolutely sure no kernels are still using the old buffer ---
+    CUDA_CHECK(cudaDeviceSynchronize());
 
+    // --- CLEANUP old allocation if it exists ---
+    float* old_ptr = nullptr;
+    CUDA_CHECK(cudaMemcpyFromSymbol(&old_ptr, d_forc_data, sizeof(old_ptr)));
+    if (old_ptr) {
+        CUDA_CHECK(cudaFree(old_ptr));
+        // Set symbol to nullptr to avoid dangling pointer
+        old_ptr = nullptr;
+        CUDA_CHECK(cudaMemcpyToSymbol(d_forc_data, &old_ptr, sizeof(old_ptr)));
+    }
+
+    // --- Allocate for the new chunk ---
     float* d_ptr = nullptr;
     size_t bytes = sizeof(float) * chunk.h_data.size();
-
-    // Allocate GPU buffer and copy
     CUDA_CHECK(cudaMalloc(&d_ptr, bytes));
     CUDA_CHECK(cudaMemcpy(d_ptr, chunk.h_data.data(), bytes, cudaMemcpyHostToDevice));
 
-    // Copy the new chunk’s pointer + metadata into device globals:
-    CUDA_CHECK(cudaMemcpyToSymbol(d_forc_data, &d_ptr, sizeof(float*)));
+    // --- Update device symbols ---
+    CUDA_CHECK(cudaMemcpyToSymbol(d_forc_data, &d_ptr, sizeof(d_ptr)));
     CUDA_CHECK(cudaMemcpyToSymbol(nForc, &chunk.nForc, sizeof(int)));
     CUDA_CHECK(cudaMemcpyToSymbol(c_forc_dt, chunk.dt.data(), sizeof(double) * chunk.nForc));
     CUDA_CHECK(cudaMemcpyToSymbol(c_forc_nT, chunk.nT.data(), sizeof(size_t) * chunk.nForc));
@@ -798,22 +843,8 @@ void uploadForcingsToGpu(NCForcing& chunk) {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2) << (bytes / (1024.0 * 1024.0));
     logInfo("Forcing uploaded to GPU (" + oss.str() + " MiB)");
-
-    // // ───────── DEBUG: Print forcing data on host ─────────
-    // std::cout << "[HOST DEBUG] Forcing count chunk.nForc=" << chunk.nForc << std::endl;
-    // for (int f = 0; f < chunk.nForc; ++f) {
-    //     size_t base0 = 0;
-    //     for (int k = 0; k < f; ++k) base0 += chunk.nT[k] * chunk.systems;
-    //     std::cout << "   forcing[" << f << "] dt=" << chunk.dt[f]
-    //             << " nT=" << chunk.nT[f]
-    //             << " first=" << chunk.h_data[base0 + 0 * chunk.systems + 0] << "\n";
-    // }
-
-
-    
-
-
 }
+
 
 // ───────── Setup solver time bounds, initial conditions, and query times
 SolverInputs prepareSolverInputs(int simYear,
@@ -839,9 +870,6 @@ SolverInputs prepareSolverInputs(int simYear,
 
 
     // Define query times using GLOBAL_QUERY_DT
-    // for (double m = input.t0; m <= input.tf; m += GLOBAL_QUERY_DT)
-    //     input.h_query_times.push_back(m);!!!
-
     // push times up to (but not including) tf
     for (double m = input.t0; m < input.tf - 1e-9; m += GLOBAL_QUERY_DT)
         input.h_query_times.push_back(m);
@@ -917,8 +945,6 @@ SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc) {
         input.t0, input.tf,                 // Simulation time bounds
         d_sp,                               // Device pointer to spatial parameters
         out.d_stiff                        // Flags buffer
-    //     d_forc_data,                        // Forcing data
-    // nForc                                   // Number of forcings
     );
 
     CUDA_CHECK( cudaPeekAtLastError() );     // reports launch-time errors
@@ -974,8 +1000,8 @@ void handleSolverOutputs(const ModelConfig& config,
     std::string sDate = formatDate(Y, M, D);
     advanceDate(Y, M, D, daysThisChunk - 1);
     std::string eDate = formatDate(Y, M, D);
-    // Append rank only when running with MPI
-    // std::string rank_tag = usingMPI ? ("_rank" + std::to_string(rank)) : "";
+
+    // Determine rank tag for filenames
     // Append rank only when truly running multi-rank under MPI
     int world_size = 1;
     if (usingMPI) {
@@ -1037,9 +1063,6 @@ void handleSolverOutputs(const ModelConfig& config,
         std::cout << "[SKIP] runoff output disabled via config\n";
     }
 
-    
-
-
 
     //std::cout << "[DONE] Outputs written for " << ns << " systems × " << nq << " time steps\n";
     std::cout << "[DONE] Rank " << rank << ": Outputs written for "
@@ -1090,7 +1113,6 @@ void handleSolverOutputs(const ModelConfig& config,
 
 
 // ───────── Formats a date (YYYY, MM, DD) into a string: "YYYYMMDD" ─────────
-// Used for naming output files with date ranges
 std::string formatDate(int Y, int M, int D) {
     char buf[9]; // YYYYMMDD + null terminator
     std::snprintf(buf, sizeof(buf), "%04d%02d%02d", Y, M, D);
@@ -1149,6 +1171,21 @@ int main(int argc, char** argv) {
     if (!loadConfiguration(argv[1], config)) {
         return 1;
     }
+
+    // ---- Validate GPU memory settings ----
+    if (config.max_gpu_mem_gb <= 0.0) {
+        throw std::runtime_error("Invalid config: max_gpu_mem_gb must be > 0");
+    }
+    if (config.gpu_mem_buffer_pct < 0.0 || config.gpu_mem_buffer_pct >= 100.0) {
+        throw std::runtime_error("Invalid config: gpu_mem_buffer_pct must be in [0, 100)");
+    }
+
+    // Optional warning for suspiciously low memory values
+    if (config.max_gpu_mem_gb < 2.0) {
+        std::cerr << "[WARN] max_gpu_mem_gb is very low (" 
+                << config.max_gpu_mem_gb << " GiB). Check your config.\n";
+    }
+
 
     if (!config.use_mpi) {
         const char* ompi = std::getenv("OMPI_COMM_WORLD_SIZE");
@@ -1214,6 +1251,19 @@ if (usingMPI) {
 int gpuCount = getGpuCount();
 assignGpuDevice(rank, gpuCount);
 
+// Log GPU info and warn if configured memory exceeds physical memory
+cudaDeviceProp prop;
+int dev;
+cudaGetDevice(&dev);
+cudaGetDeviceProperties(&prop, dev);
+
+double total_gb = static_cast<double>(prop.totalGlobalMem) / (1024.0*1024.0*1024.0);
+if (config.max_gpu_mem_gb > total_gb) {
+    std::cerr << "[WARN] Configured max_gpu_mem_gb (" << config.max_gpu_mem_gb
+              << " GiB) exceeds physical GPU memory (" << total_gb << " GiB).\n";
+}
+
+
 std::vector<SpatialParams> spatialParams;
 
 if (!usingMPI) {
@@ -1256,10 +1306,20 @@ if (!config.constant_parameters_index.empty()) {
 
 // Build, upload, run simulation
 auto streams = buildStreams(spatialParams);
+
+// --- Hot start from final.nc if configured ---
+if (config.initial_mode == "from_file") {
+    std::cout << "[INFO] Loading initial state from file: "
+              << config.initial_file << "\n";
+    load_initial_from_final_nc_serial(config.initial_file, streams);
+}
+
+// Now upload and run
 setupGpu(spatialParams, streams);
 for (int simYear = startYear(config); simYear <= endYear(config); ++simYear) {
     simulateYear(simYear, config, streams, rank, usingMPI);
 }
+
 
 if (usingMPI) {
     MPI_Finalize();

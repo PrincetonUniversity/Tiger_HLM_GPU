@@ -128,8 +128,9 @@ std::pair<std::vector<double>, std::vector<double>> retrieve_and_free(
  *
  * @param num_systems Number of systems to simulate.
  * @return           Number of days per chunk.
+ * @param config       Simulation configuration (contains memory limits).
  */
-int computeDaysPerChunk(int num_systems);
+int computeDaysPerChunk(int num_systems, const ModelConfig& config);
 
 /**
  * @brief Advances the given date by a specified number of days.
