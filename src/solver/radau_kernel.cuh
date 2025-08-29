@@ -1,4 +1,3 @@
-//solver/radau_kernel.cuh
 #pragma once
 
 // Forward‐declaration of the implicit Radau IIA multi‐system kernel
@@ -15,9 +14,7 @@ __global__ void radau_kernel_multi(
     double  tf,
     const typename Runoff5::SP_TYPE* d_sp,
     int*    stiff_system_indices,
-    int     n_stiff,
-    const float*  d_forc_data,  // forcing data
-    int           nForc       // number of forcings
+    int     n_stiff
 );
 
 

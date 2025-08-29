@@ -1,4 +1,3 @@
-//src/solver/rk45_step_dense.cuh
 #pragma once
 
 #include <math.h>
