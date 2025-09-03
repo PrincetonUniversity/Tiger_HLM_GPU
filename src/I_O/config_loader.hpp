@@ -51,6 +51,7 @@ struct ModelConfig {
     // Initial conditions
     std::string initial_mode;
     std::string initial_file;
+    std::vector<double> initial_values; // used if initial_mode == "constant"
     
     // Parameters
     std::string              parameters_path;
@@ -89,6 +90,8 @@ struct ModelConfig {
     
     // Flags
     bool use_mpi;  // Use MPI for parallel execution
+    double max_gpu_mem_gb;       // GPU memory budget (GiB)
+    double gpu_mem_buffer_pct;   // Reserve percentage of GPU memory for overhead
 };
 
 // Simple YAML parser class

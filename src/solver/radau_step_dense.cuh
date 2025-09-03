@@ -1,5 +1,3 @@
-// src/solver/radau_step_dense.cuh
-
 #pragma once
 #include <cmath>
 #include <cuda_runtime.h>

@@ -366,6 +366,17 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     // Load initial section
     config.initial_mode = parser.getString("initial.mode");
     config.initial_file = parser.getString("initial.file");
+    config.initial_values = parser.getDoubleArray("initial.values");
+
+    // Validate size if provided
+    // state size = 9 for now, change if using a different model
+    constexpr int STATE_SIZE = 9;
+    if (!config.initial_values.empty() && 
+        static_cast<int>(config.initial_values.size()) != STATE_SIZE) {
+        throw std::runtime_error(
+            "Initial values must have exactly " + std::to_string(STATE_SIZE) + " entries");
+    }
+
     
     // Load parameters
     config.parameters_path = parser.getString("parameters.path");
@@ -534,6 +545,13 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     
     // Load flags
     config.use_mpi = parser.getBool("flags.use_mpi", false);
+    config.max_gpu_mem_gb     = parser.getDouble("flags.max_gpu_mem_gb", 15.0); // Default to 15 GiB
+    config.gpu_mem_buffer_pct = parser.getDouble("flags.gpu_mem_buffer_pct", 15.0); // Default to 15%
+    if (config.max_gpu_mem_gb <= 0.0) {
+        throw std::runtime_error(
+            "You must set flags.max_gpu_mem_gb > 0 in your config YAML (GiB)."
+        );
+    }
     
     return config;
 }

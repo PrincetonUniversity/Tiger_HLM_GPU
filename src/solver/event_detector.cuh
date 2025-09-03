@@ -1,4 +1,3 @@
-// src/solver/event_detector.cuh
 #pragma once
 
 #include <cmath>

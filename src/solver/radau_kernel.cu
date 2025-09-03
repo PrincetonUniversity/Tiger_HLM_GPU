@@ -1,5 +1,3 @@
-// src/solver/radau_kernel.cu
-
 #include <cstdio>
 #include <cuda_runtime.h>
 #include "rk45.h"               // for query_times / y0_all types
@@ -41,9 +39,7 @@ __global__ void radau_kernel_multi(
     double  tf,
     const typename Runoff5::SP_TYPE* d_sp,
     int*    stiff_system_indices,
-    int     n_stiff,
-    const float*  d_forc_data,  // ★ new
-    int nForc        // ★ new: number of forcings
+    int     n_stiff
 )
     
   {
@@ -166,7 +162,5 @@ template __global__ void radau_kernel_multi<Runoff5>(
     int, int, double, double,
     const typename Runoff5::SP_TYPE*, 
     int*,     // stiff_system_indices
-    int,       // n_stiff
-    const float*, // forcing data
     int         // number of forcings
 );

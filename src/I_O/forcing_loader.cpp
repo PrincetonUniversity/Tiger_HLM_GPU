@@ -1,6 +1,7 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <string>
 #include <vector>
 #include <stdexcept>
 #include <algorithm>
@@ -488,6 +489,12 @@ void NCForcing::loadData() {
     dt.resize(nForc);
     nT.resize(nForc);
 
+    // Per-forcing grid dims and stream→pixel maps
+    std::vector<size_t> nlatF(nForc, 0), nlonF(nForc, 0);
+    std::vector<bool>   dimsSetF(nForc, false);
+    std::vector<std::vector<int>> pixIndexF(nForc);
+
+
     // chunk window [start, end) in epoch seconds (UTC)
     std::tm s_tm{}; s_tm.tm_year = Ys-1900; s_tm.tm_mon = Ms-1; s_tm.tm_mday = Ds;
     std::tm e_tm{}; e_tm.tm_year = Ye-1900; e_tm.tm_mon = Me-1; e_tm.tm_mday = De;
@@ -495,26 +502,28 @@ void NCForcing::loadData() {
     const time_t chunk_end   = timegm_utc(e_tm) + 86400;  // exclusive 00:00 after end day
 
     // grid dims (from the first opened file)
-    size_t nlat_global = 0, nlon_global = 0;
-    bool grid_dims_set = false;
+    // size_t nlat_global = 0, nlon_global = 0;
+    // bool grid_dims_set = false;
 
-    // flattened pixel index per system (iy*nlon + ix)
-    std::vector<int> pix_index(systemIds.size(), -1);
+    // // flattened pixel index per system (iy*nlon + ix)
+    // std::vector<int> pix_index(systemIds.size(), -1);
 
-    auto build_pix_index = [&](size_t nlon) {
-        for (size_t s = 0; s < systemIds.size(); ++s) {
-            auto [iy, ix] = mapper.getLatLon(systemIds[s]);
-            if (iy < 0 || ix < 0) {
-                throw std::runtime_error("Invalid lat/lon mapping for stream " +
-                                         std::to_string(systemIds[s]));
-            }
-            if (static_cast<size_t>(iy) >= nlat_global || static_cast<size_t>(ix) >= nlon) {
-                throw std::runtime_error("Lat/Lon mapping out of bounds for stream " +
-                                         std::to_string(systemIds[s]));
-            }
-            pix_index[s] = iy * static_cast<int>(nlon) + ix;
-        }
-    };
+    // auto build_pix_index = [&](size_t nlon) {
+    //     for (size_t s = 0; s < systemIds.size(); ++s) {
+    //         auto [iy, ix] = mapper.getLatLon(systemIds[s]);
+    //         if (iy < 0 || ix < 0) {
+    //             throw std::runtime_error("Invalid lat/lon mapping for stream " +
+    //                                      std::to_string(systemIds[s]));
+    //         }
+    //         if (static_cast<size_t>(iy) >= nlat_global || static_cast<size_t>(ix) >= nlon) {
+    //             throw std::runtime_error("Lat/Lon mapping out of bounds for stream " +
+    //                                      std::to_string(systemIds[s]));
+    //         }
+    //         pix_index[s] = iy * static_cast<int>(nlon) + ix;
+    //     }
+    // };
+
+
 
     // ── first pass per forcing: compute nT[f] and set dt[f] ──
     for (int f = 0; f < nForc; ++f) {
@@ -522,22 +531,102 @@ void NCForcing::loadData() {
         dt[f] = ent.dt_hours;
         size_t total_steps = 0;
 
+        // (Optional) ensure mapper corresponds to THIS forcing (if you populated lookup_csv)
+        if (!ent.lookup_csv.empty()) {
+            mapper = LookupMapper(ent.lookup_csv);
+            if (!mapper.load()) {
+                throw std::runtime_error("Failed to load lookup CSV: " + ent.lookup_csv);
+            }
+        }
+
+
         for (const auto& path : ent.files) {
             int ncid=-1, varid=-1, tvar=-1;
             NC_CHECK(nc_open(path.c_str(), NC_NOWRITE, &ncid));
+
+            // Error handler
+            auto close_then_throw = [&](const std::string& msg){
+                nc_close(ncid); throw std::runtime_error(msg); };
 
             // dims (must be time, latitude, longitude)
             const size_t nlat = dim_len(ncid, ent.dims_lat.c_str());
             const size_t nlon = dim_len(ncid, ent.dims_lon.c_str());
             const size_t ntim = dim_len(ncid, ent.dims_time.c_str());
 
-            if (!grid_dims_set) {
-                nlat_global = nlat; nlon_global = nlon; grid_dims_set = true;
-                build_pix_index(nlon_global);
-            } else if (nlat != nlat_global || nlon != nlon_global) {
-                nc_close(ncid);
-                throw std::runtime_error("Grid dims mismatch across files for forcing " + ent.var_name);
+            // if (!grid_dims_set) {
+            //     nlat_global = nlat; nlon_global = nlon; grid_dims_set = true;
+            //     build_pix_index(nlon_global);
+            // } else if (nlat != nlat_global || nlon != nlon_global) {
+            //     if (!dimsSetF[f]) {
+            //         nlatF[f] = nlat;
+            //         nlonF[f] = nlon;
+            //         dimsSetF[f] = true;
+
+            //         // build per-forcing stream→pixel map (flattened iy*nlon + ix)
+            //         pixIndexF[f].resize(systemIds.size(), -1);
+            //         for (size_t s = 0; s < systemIds.size(); ++s) {
+            //             auto [iy, ix] = mapper.getLatLon(systemIds[s]);
+            //             if (iy < 0 || ix < 0) {
+            //                 throw std::runtime_error("Invalid lat/lon mapping for stream " + std::to_string(systemIds[s]));
+            //             }
+            //             if (static_cast<size_t>(iy) >= nlatF[f] || static_cast<size_t>(ix) >= nlonF[f]) {
+            //                 throw std::runtime_error("Lat/Lon mapping out of bounds for stream " + std::to_string(systemIds[s]));
+            //             }
+            //             pixIndexF[f][s] = iy * static_cast<int>(nlonF[f]) + ix;
+            //         }
+            //     } else if (nlat != nlatF[f] || nlon != nlonF[f]) {
+            //         nc_close(ncid);
+            //         throw std::runtime_error("Grid dims mismatch across files for forcing " + ent.var_name);
+            //     }
+
+                
+            //     nc_close(ncid);
+            //     throw std::runtime_error("Grid dims mismatch across files for forcing " + ent.var_name);
+            // }
+
+            // FIRST PASS — after nlat, nlon are known
+            if (!dimsSetF[f]) {
+                nlatF[f] = nlat;
+                nlonF[f] = nlon;
+                dimsSetF[f] = true;
+
+                pixIndexF[f].resize(systemIds.size(), -1);
+                // for (size_t s = 0; s < systemIds.size(); ++s) {
+                //     auto [iy, ix] = mapper.getLatLon(systemIds[s]);
+                //     if (iy < 0 || ix < 0) {
+                //         // throw std::runtime_error("Invalid lat/lon mapping for stream " + std::to_string(systemIds[s]));
+                //         close_then_throw("Invalid lat/lon mapping for stream " + std::to_string(systemIds[s]));
+                //      }
+                //     }
+                //     if (static_cast<size_t>(iy) >= nlatF[f] || static_cast<size_t>(ix) >= nlonF[f]) {
+                //         // throw std::runtime_error("Lat/Lon mapping out of bounds for stream " + std::to_string(systemIds[s]));
+                //         close_then_throw("Lat/Lon mapping out of bounds for stream " + std::to_string(systemIds[s]));
+                //     }
+                //     pixIndexF[f][s] = iy * static_cast<int>(nlonF[f]) + ix;
+                // }
+                for (size_t s = 0; s < systemIds.size(); ++s) {
+                    auto [iy, ix] = mapper.getLatLon(systemIds[s]);
+
+                    if (iy < 0 || ix < 0) {
+                        close_then_throw(
+                            "Invalid lat/lon mapping for stream " + std::to_string(systemIds[s]));
+                    }
+                    if (static_cast<size_t>(iy) >= nlatF[f] || static_cast<size_t>(ix) >= nlonF[f]) {
+                        close_then_throw(
+                            "Lat/Lon mapping out of bounds for stream " + std::to_string(systemIds[s]) +
+                            " (iy=" + std::to_string(iy) + ", ix=" + std::to_string(ix) +
+                            ", nlat=" + std::to_string(nlatF[f]) + ", nlon=" + std::to_string(nlonF[f]) + ")");
+                    }
+
+                    pixIndexF[f][s] = iy * static_cast<int>(nlonF[f]) + ix;
+                }
+            } else if (nlat != nlatF[f] || nlon != nlonF[f]) {
+                // throw std::runtime_error("Grid dims mismatch across files for forcing " + ent.var_name);
+                close_then_throw("Grid dims mismatch across files for forcing " + ent.var_name);
             }
+
+
+            
 
             NC_CHECK(nc_inq_varid(ncid, ent.var_name.c_str(), &varid));
             NC_CHECK(nc_inq_varid(ncid, ent.dims_time.c_str(), &tvar));
@@ -577,25 +666,35 @@ void NCForcing::loadData() {
     }();
     h_data.assign(total_elems, 0.0f);
 
+    if (systems != static_cast<int>(systemIds.size())) {
+        throw std::runtime_error("systems != systemIds.size()");
+    }
+
     auto baseF = [&](int f)->size_t {
         size_t base = 0;
         for (int k = 0; k < f; ++k) base += nT[k] * size_t(systems);
         return base;
     };
 
-    // host slice buffer [lat,lon]
-    std::vector<float> slice_host;
-    if (nlat_global == 0 || nlon_global == 0) {
-        // no data available across all forcings
-        return;
-    }
-    slice_host.resize(nlat_global * nlon_global);
+    // // host slice buffer [lat,lon]
+    // std::vector<float> slice_host;
+    // if (nlat_global == 0 || nlon_global == 0) {
+    //     // no data available across all forcings
+    //     return;
+    // }
+    // slice_host.resize(nlat_global * nlon_global);
 
     // ── second pass: read [time][lat][lon] slices and scatter to [f][t][system] ──
     for (int f = 0; f < nForc; ++f) {
         const auto& ent = entries[f];
         const size_t Fbase = baseF(f);
         size_t t_written = 0;
+
+        // Skip if this forcing produced no overlapping data/files
+        if (!dimsSetF[f] || nlatF[f] == 0 || nlonF[f] == 0) {
+            continue;
+        }
+        std::vector<float> slice_host(nlatF[f] * nlonF[f]);    
 
         for (const auto& path : ent.files) {
             int ncid=-1, varid=-1, tvar=-1;
@@ -637,7 +736,8 @@ void NCForcing::loadData() {
             if (i0 >= i1) { nc_close(ncid); continue; }
 
             size_t start[3] = {0, 0, 0};
-            size_t count[3] = {1, nlat_global, nlon_global};
+            // size_t count[3] = {1, nlat_global, nlon_global};
+            size_t count[3] = {1, nlatF[f], nlonF[f]};
 
             for (size_t ti = i0; ti < i1; ++ti) {
                 start[0] = ti;
@@ -645,7 +745,8 @@ void NCForcing::loadData() {
 
                 float* dst = h_data.data() + (Fbase + t_written * size_t(systems));
                 for (size_t s = 0; s < size_t(systems); ++s) {
-                    dst[s] = slice_host[ static_cast<size_t>(pix_index[s]) ];
+                    // dst[s] = slice_host[ static_cast<size_t>(pix_index[s]) ];
+                    dst[s] = slice_host[ static_cast<size_t>(pixIndexF[f][s]) ];
                 }
                 ++t_written;
             }

@@ -33,18 +33,17 @@ __global__ void rk45_then_radau_multi(
     double* y0_all,       // [num_systems × N_EQ]
     double* y_final_all,  // [num_systems × N_EQ]
     double* query_times,  // [num_queries]
-    //double* dense_all,    // [num_systems × N_EQ × num_queries]
-    float* dense_all,
-    int     num_systems,
-    int     num_queries,
-    double  t0,
-    double  tf,
-    const typename Runoff5::SP_TYPE* d_sp,
+    float* dense_all,     // [num_systems × num_queries × N_EQ]
+    int     num_systems,  // number of systems to solve
+    int     num_queries,  // number of queries to answer
+    double  t0,           // initial time
+    double  tf,           // final time
+    const typename Runoff5::SP_TYPE* d_sp, // system parameters
     int*    d_stiff       // flag array
 ) {
 
     
-    // re-declare the symbols you need:
+    // re-declare the symbols
     extern __device__   float*   d_forc_data;
     extern __constant__ double   c_forc_dt[];
     extern __constant__ size_t   c_forc_nT[];
@@ -53,6 +52,14 @@ __global__ void rk45_then_radau_multi(
     constexpr int N_EQ = Runoff5::N_EQ;
     int sys = blockIdx.x*blockDim.x + threadIdx.x;
     if (sys >= num_systems) return;
+
+    // Checks whether the global device pointer d_forc_data is non-null
+    if (!d_forc_data) {
+        if (sys == 0) {
+            printf("[KERNEL] d_forc_data is null; skipping computation.\n");
+        }
+        return;
+    }
 
     // solver parameters
     double rtol = devParams.rtol;
@@ -80,7 +87,7 @@ __global__ void rk45_then_radau_multi(
         for (int j = 0; j < nForc; ++j) {
 
             // compute which sample we need for this forcing
-            double dt_min        = c_forc_dt[j] * 60.0;           // minutes
+            double dt_min        = c_forc_dt[j] * 60.0;          // minutes
             double sampleIdxReal = (t - t0) / dt_min;            // fractional step
             size_t nSamples      = c_forc_nT[j];
             size_t sampleIdx     = sampleIdxReal < 0.0
