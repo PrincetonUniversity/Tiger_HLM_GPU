@@ -84,6 +84,8 @@ struct ForcingEntry {
     std::string dims_time;   // default "time"
     std::string dims_lat;    // default "latitude"
     std::string dims_lon;    // default "longitude"
+
+    std::string lookup_csv;         // CSV mapping stream -> (lat_index, lon_index) for this forcing
 };
 
 // ─────────── NCForcing ───────────
