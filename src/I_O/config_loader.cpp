@@ -366,6 +366,17 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     // Load initial section
     config.initial_mode = parser.getString("initial.mode");
     config.initial_file = parser.getString("initial.file");
+    config.initial_values = parser.getDoubleArray("initial.values");
+
+    // Validate size if provided
+    // state size = 9 for now, change if using a different model
+    constexpr int STATE_SIZE = 9;
+    if (!config.initial_values.empty() && 
+        static_cast<int>(config.initial_values.size()) != STATE_SIZE) {
+        throw std::runtime_error(
+            "Initial values must have exactly " + std::to_string(STATE_SIZE) + " entries");
+    }
+
     
     // Load parameters
     config.parameters_path = parser.getString("parameters.path");

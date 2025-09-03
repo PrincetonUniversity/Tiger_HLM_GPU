@@ -51,6 +51,7 @@ struct ModelConfig {
     // Initial conditions
     std::string initial_mode;
     std::string initial_file;
+    std::vector<double> initial_values; // used if initial_mode == "constant"
     
     // Parameters
     std::string              parameters_path;
