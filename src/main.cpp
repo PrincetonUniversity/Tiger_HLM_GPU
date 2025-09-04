@@ -1246,23 +1246,6 @@ if (!usingMPI) {
               << " systems (rows " << s << " .. " << (e ? e-1 : 0) << ")\n";
 }
 
-// Apply constant overrides
-if (!config.constant_parameters_index.empty()) {
-    for (auto &sp : spatialParams) {
-        for (size_t i = 0; i < config.constant_parameters_index.size(); ++i) {
-            int idx = config.constant_parameters_index[i];
-            double v = config.constant_parameters_values[i];
-            switch (idx) {
-                case 0:  sp.c1    = v; break; 
-                case 1:  sp.Hu    = v; break; 
-                case 2:  sp.infil = v; break;
-                case 3:  sp.perco = v; break;
-                default: std::cerr << "Warning: unknown const idx="<<idx<<"\n";
-            }
-        }
-    }
-}
-
 // === DEBUG: print first stream parameters to check overrides ===
 if (!spatialParams.empty()) {
     const auto &sp = spatialParams.front();
