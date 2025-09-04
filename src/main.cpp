@@ -395,19 +395,33 @@ std::vector<SpatialParams> receiveSpatialParams() {
 
 
 // ───────── Build vector of Stream<Runoff5> from SpatialParams ─────────
-std::vector<Stream<Runoff5>> buildStreams(const std::vector<SpatialParams>& params) {
-    // Define a common initial state y0 for all streams (9-variable model)
-    std::array<double, Runoff5::N_EQ> y0_common = {0.01, 0.1, 0.0, 0.0, 0.01, 1, 1, 0, 0};
+std::vector<Stream<Runoff5>> buildStreams(const std::vector<SpatialParams>& params,
+                                          const ModelConfig& config) {
+    std::array<double, Runoff5::N_EQ> y0_common;
+
+    if (config.initial_mode == "from_file") {
+        // placeholder; will be overwritten by load_initial_from_final_nc_serial()
+        y0_common = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    } else {
+        // constant mode: prefer YAML values if present, else fallback to old default
+        std::array<double, Runoff5::N_EQ> fallback = {0.01, 0.1, 0.0, 0.1, 0.01, 1, 1, 0, 0};
+
+        if (!config.initial_values.empty()) {
+            for (int i = 0; i < Runoff5::N_EQ; ++i)
+                y0_common[i] = config.initial_values[i];
+        } else {
+            y0_common = fallback;
+        }
+    }
 
     std::vector<Stream<Runoff5>> streams;
     streams.reserve(params.size());
-
     for (const auto& sp : params) {
         streams.emplace_back(sp, y0_common);
     }
-
     return streams;
 }
+
 
 // ───────── Allocate & upload SpatialParams to device ─────────
 void setupGpu(const std::vector<SpatialParams>& spatialParams,
@@ -542,14 +556,6 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
 
 
 // ───────── Dynamically compute how many days per chunk fit in memory ─────────
-// int computeDaysPerChunk(int num_systems) {
-//     constexpr std::uint64_t MAX_BYTES = 30ULL * 1024 * 1024 * 1024; // 15 GiB limit!!!
-//     int N_EQ = Runoff5::N_EQ;
-//     double max_chunk_days = (double(MAX_BYTES) / (4.0 * N_EQ * num_systems) - 1.0) / 24.0; // double
-//     int DAYS_PER_CHUNK = std::max(1, int(std::floor(max_chunk_days)));
-
-//     return DAYS_PER_CHUNK;
-// }
 int computeDaysPerChunk(int num_systems, const ModelConfig& config) {
     const double usable_bytes =
         config.max_gpu_mem_gb *
@@ -563,14 +569,6 @@ int computeDaysPerChunk(int num_systems, const ModelConfig& config) {
     int days = std::max(1, static_cast<int>(std::floor(max_chunk_days)));
 
     // ---- Logging ----
-    // std::ostringstream oss;
-    // oss << std::fixed << std::setprecision(2)
-    //     << "[GPU] Total memory = " << config.max_gpu_mem_gb << " GiB\n"
-    //     << "[GPU] Buffer reserved = " << config.gpu_mem_buffer_pct << "%\n"
-    //     << "[GPU] Usable memory = "
-    //     << (usable_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB\n"
-    //     << "[GPU] Estimated DAYS_PER_CHUNK = " << days;
-    // logGpu(oss.str());
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2)
         << "Total memory = " << config.max_gpu_mem_gb << " GiB\n"
@@ -1068,45 +1066,6 @@ void handleSolverOutputs(const ModelConfig& config,
     std::cout << "[DONE] Rank " << rank << ": Outputs written for "
           << ns << " systems × " << nq << " time steps\n";
 
-    // ───── DEBUG: Final state for s=0 after the chunk ─────
-    // std::cout << "[DEBUG OUTPUT] Final state for s=0 after last time step:\n";
-    // for (int i = 0; i < N_EQ; ++i) {
-    //     std::cout << "  y_final[" << i << "] = " << h_y_final[i] << std::endl;
-    // }
-
-    // ───── DEBUG Output: Inspecting Model State Variables for First System Across Initial Query Times ─────
-    // { 
-    //     const int SYS  = 0;                 // first system
-    //     const int N_EQ = Runoff5::N_EQ;
-    //     const int nq   = output.num_queries;
-    //     const int max_q = std::min(6, nq);  // q = 0..5 inclusive
-
-    //     static const char* STATE_NAMES[Runoff5::N_EQ] = {
-    //         "SNOW_STORAGE",
-    //         "STATIC_STORAGE",
-    //         "SURFACE_STORAGE",
-    //         "GRAVITATIONAL_STORAGE",
-    //         "AQUIFER_STORAGE",
-    //         "TEMP_AIR",
-    //         "TEMP_SOIL",
-    //         "SURFACE_RUNOFF",
-    //         "TOTAL_RUNOFF"
-    //     };
-
-    //     std::cout << "[CHECK] States for system " << SYS
-    //             << " at q=0.." << (max_q - 1) << "\n";
-
-    //     for (int q = 0; q < max_q; ++q) {
-    //         double tq = input.h_query_times[q]; // minutes since chunk start
-    //         std::cout << "  q=" << q << "  t=" << tq << " min\n";
-    //         for (int c = 0; c < N_EQ; ++c) {
-    //             double val = h_dense[(SYS * nq + q) * N_EQ + c]; // [sys][q][comp]
-    //             std::cout << "    [" << c << "] " << STATE_NAMES[c]
-    //                     << " = " << val << "\n";
-    //         }
-    //     }
-    // }
-
 
 
 }
@@ -1294,8 +1253,8 @@ if (!config.constant_parameters_index.empty()) {
             int idx = config.constant_parameters_index[i];
             double v = config.constant_parameters_values[i];
             switch (idx) {
-                case 0:  sp.c1    = v; break;
-                case 1:  sp.Hu    = v; break;
+                case 0:  sp.c1    = v; break; 
+                case 1:  sp.Hu    = v; break; 
                 case 2:  sp.infil = v; break;
                 case 3:  sp.perco = v; break;
                 default: std::cerr << "Warning: unknown const idx="<<idx<<"\n";
@@ -1304,8 +1263,24 @@ if (!config.constant_parameters_index.empty()) {
     }
 }
 
+// === DEBUG: print first stream parameters to check overrides ===
+if (!spatialParams.empty()) {
+    const auto &sp = spatialParams.front();
+    std::cout << "=== DEBUG: FIRST STREAM PARAMETERS ===\n";
+    std::cout << "stream ID     : " << sp.stream << "\n";
+    std::cout << "c1 (m/min per mm/hr): " << sp.c1 << "\n";
+    std::cout << "Hu (m)        : " << sp.Hu << "\n";
+    std::cout << "infil (m/min) : " << sp.infil << "\n";
+    std::cout << "perco (m/min) : " << sp.perco << "\n";
+    std::cout << "A_h (m^2)     : " << sp.A_h << "\n";
+    std::cout << "Slope (m/m)   : " << sp.slope << "\n";
+    std::cout << "n_mann        : " << sp.n_mann << "\n";
+    std::cout << "=====================================\n";
+}
+
+
 // Build, upload, run simulation
-auto streams = buildStreams(spatialParams);
+auto streams = buildStreams(spatialParams, config);
 
 // --- Hot start from final.nc if configured ---
 if (config.initial_mode == "from_file") {

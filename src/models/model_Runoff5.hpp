@@ -87,20 +87,20 @@ struct Runoff5
         // ── 2) spatial params ────────────────────────────────────
         const auto &P   = sp_ptr[sys];
         double c1       = P.c1;      // mm/hr → m/min
-        double Hu       = P.Hu;
-        double infil    = P.infil;
-        double perco    = P.perco;
-        double lat      = P.lat;
-        double sw       = P.sw;
-        double ss       = P.ss;
-        double n_mann   = P.n_mann;
-        double slope    = P.slope;
-        double L        = P.L;
-        double A_i      = P.A_i;     
-        double A_h      = P.A_h;
-        double alpha3   = P.alpha3;
-        double alpha4   = P.alpha4;
-        double melt_f   = P.melt_f;
+        double Hu       = P.Hu;// depth of static tank [mm]
+        double infil    = P.infil; // i2 * p.c1;  // infiltration rate [m/min]
+        double perco    = P.perco; // i3 * p.c1;  // percolation rate to aquifer [m/min]
+        double lat      = P.lat; // hillslope latitude in degrees for PET calculation [unitless]
+        double sw       = P.sw; // relative soil moisture wilting point [unitless]
+        double ss       = P.ss; // relative soil moisture point of stomatal closure [unitless]
+        double n_mann   = P.n_mann; // Manning's n coefficient [unitless]
+        double slope    = P.slope; // average slope of hillslope [m/m]
+        double L        = P.L;  // length of channel [m]
+        double A_i      = P.A_i;  // drainage area in [m²], don't need this parameter for runoff !!! remove it
+        double A_h      = P.A_h; // area of hillslopes in [m²]
+        double alpha3   = P.alpha3; // res_ss * 24.0 * 60.0; //days → minutes
+        double alpha4   = P.alpha4; // res_gw * 24.0 * 60.0; //days → minutes
+        double melt_f   = P.melt_f; 
         double temp_thr = P.temp_thr;
 
         // ── 3) forcings  ─────────────────────────────────────────
