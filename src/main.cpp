@@ -1247,19 +1247,19 @@ if (!usingMPI) {
 }
 
 // === DEBUG: print first stream parameters to check overrides ===
-if (!spatialParams.empty()) {
-    const auto &sp = spatialParams.front();
-    std::cout << "=== DEBUG: FIRST STREAM PARAMETERS ===\n";
-    std::cout << "stream ID     : " << sp.stream << "\n";
-    std::cout << "c1 (m/min per mm/hr): " << sp.c1 << "\n";
-    std::cout << "Hu (m)        : " << sp.Hu << "\n";
-    std::cout << "infil (m/min) : " << sp.infil << "\n";
-    std::cout << "perco (m/min) : " << sp.perco << "\n";
-    std::cout << "A_h (m^2)     : " << sp.A_h << "\n";
-    std::cout << "Slope (m/m)   : " << sp.slope << "\n";
-    std::cout << "n_mann        : " << sp.n_mann << "\n";
-    std::cout << "=====================================\n";
-}
+// if (!spatialParams.empty()) {
+//     const auto &sp = spatialParams.front();
+//     std::cout << "=== DEBUG: FIRST STREAM PARAMETERS ===\n";
+//     std::cout << "stream ID     : " << sp.stream << "\n";
+//     std::cout << "c1 (m/min per mm/hr): " << sp.c1 << "\n";
+//     std::cout << "Hu (m)        : " << sp.Hu << "\n";
+//     std::cout << "infil (m/min) : " << sp.infil << "\n";
+//     std::cout << "perco (m/min) : " << sp.perco << "\n";
+//     std::cout << "A_h (m^2)     : " << sp.A_h << "\n";
+//     std::cout << "Slope (m/m)   : " << sp.slope << "\n";
+//     std::cout << "n_mann        : " << sp.n_mann << "\n";
+//     std::cout << "=====================================\n";
+// }
 
 
 // Build, upload, run simulation
