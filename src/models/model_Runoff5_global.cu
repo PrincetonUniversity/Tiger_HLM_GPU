@@ -1,7 +1,5 @@
-// models/model_Runoff5_global.cu
-
 #include "../models/model_Runoff5.hpp"
-#include "../I_O/parameters_loader.hpp"   // for the free‐standing SpatialParams
+#include "../I_O/parameters_loader.hpp"   
 #include <stdio.h>
 
 #ifdef USE_MODEL_5
