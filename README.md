@@ -101,13 +101,13 @@ root/
     │   └── rk45_api.hpp        # Host‐side “run_rk45<T>” and setModelParameters<T>() wrapper
     │
     └──  models/                 
-        ├── model_204_global.cu     
+        ├── model_204_global.cu     # GPU constants for Runoff5 parameters
         ├── model_204.hpp
-    	├── model_registry.hpp	
-		├── model_registry.cpp	# Defines the single __constant__ devParams for DummyModel   
-        ├── ETmethods.cpp
+    	├── model_registry.hpp		# Model equations for Runoff
+		├── model_registry.cpp		# Defines the single __constant__ devParams for DummyModel   
+        ├── ETmethods.cpp  			# Evapotranspiration formulas (Hamon, ETactual)
         ├── ETmethods.hpp
-        ├── soiltemp.cpp
+        ├── soiltemp.cpp 			# Implements soil temperature change at daily scale
         └── soiltemp.hpp
 
 ```
