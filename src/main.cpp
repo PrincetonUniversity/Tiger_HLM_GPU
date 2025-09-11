@@ -813,6 +813,35 @@ void uploadForcingsToGpu(NCForcing& chunk) {
         throw std::runtime_error("No forcing data loaded for this chunk");
     }
 
+    // --- DEBUG: Scan host data for NaN/Inf values ---
+    {
+        auto scan = [](const float* a, size_t n, const char* name){
+            size_t bad=0, first=(size_t)-1;
+            float mn=INFINITY, mx=-INFINITY;
+            for(size_t i=0;i<n;i++){
+                float v=a[i];
+                if(!std::isfinite(v)){ bad++; if(first==(size_t)-1) first=i; }
+                else { if(v<mn) mn=v; if(v>mx) mx=v; }
+            }
+            if(bad){
+                std::fprintf(stderr,
+                "[NaNCHK] %s: %zu bad values; first idx=%zu\n", name, bad, first);
+                // Bail early so you know it’s inputs, not the kernel:
+                throw std::runtime_error("NaN/Inf detected in forcings");
+            } else {
+                std::fprintf(stderr,"[NaNCHK] %s: min=%g max=%g\n", name, (double)mn, (double)mx);
+            }
+        };
+        // pr is f=0, t2m is f=1; scan each forcing slab
+        size_t base = 0;
+        for(int f=0; f<chunk.nForc; ++f){
+            size_t count = (size_t)chunk.nT[f] * (size_t)chunk.systems;
+            scan(chunk.h_data.data()+base, count, f==0?"pr":"t2m");
+            base += count;
+        }
+    }
+
+
     // --- Make absolutely sure no kernels are still using the old buffer ---
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -1186,10 +1215,10 @@ int main(int argc, char** argv) {
     }
 
     GLOBAL_QUERY_DT = config.query_dt_minutes;   // set from YAML
-    if (GLOBAL_QUERY_DT > 60.0) {
+    if (GLOBAL_QUERY_DT > 1440.0) {
         std::cout << "[WARN] query_dt in config (" << GLOBAL_QUERY_DT 
-                << " min) exceeds max allowed (60 min). Using 60.\n";
-        GLOBAL_QUERY_DT = 60.0;
+                << " min) exceeds max allowed 1 day (1440 mins). Using 1440 mins.\n";
+        GLOBAL_QUERY_DT = 1440.0;
     }
 
 
