@@ -37,11 +37,11 @@ std::vector<SpatialParams> loadSpatialParams(const std::string& csv_path) {
         "hu",                     // → SpatialParams::Hu
         "centroid_lon",           // → SpatialParams::lon
         "centroid_lat",           // → SpatialParams::lat
-        "sw", "ss",
+        "sw", "ss",               //→ SpatialParams::sw, SpatialParams::ss 
         "n",                      // → SpatialParams::n_mann
-        "slope",
+        "slope",                  // → SpatialParams::slope
         "length_km",              // → SpatialParams::L
-        // "drainage_area_km2",      // → SpatialParams::A_i
+        // "drainage_area_km2",   // → SpatialParams::A_i
         "area_sqkm",              // → SpatialParams::A_h
         "melt",                   // → SpatialParams::melt_f
         "t_thres",                // → SpatialParams::temp_thr
