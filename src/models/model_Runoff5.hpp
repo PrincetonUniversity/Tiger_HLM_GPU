@@ -98,7 +98,7 @@ struct Runoff5
         // ── 2) spatial params ────────────────────────────────────
         const auto &P   = sp_ptr[sys];
         double c1       = P.c1;      // mm/hr → m/min
-        double Hu       = P.Hu;// depth of static tank [mm]
+        double Hu       = P.Hu; // depth of static tank [m], converted from mm to m in parameters_loader.cpp
         double infil    = P.infil; // i2 * p.c1;  // infiltration rate [m/min]
         double perco    = P.perco; // i3 * p.c1;  // percolation rate to aquifer [m/min]
         double lat      = P.lat; // hillslope latitude in degrees for PET calculation [unitless]
