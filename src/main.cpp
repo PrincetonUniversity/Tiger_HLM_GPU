@@ -482,11 +482,58 @@ void setupGpu(const std::vector<SpatialParams>& spatialParams,
     }
 }
 
-// ───────── Determines if a given year is a leap year ─────────
+// ───────── Determines if a given year is a leap year ───────── 
 // Leap year rule: divisible by 4, but not by 100 unless also divisible by 400
 bool isLeapYear(int year) {
     return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
 }
+
+// --- SUPER-SIMPLE GPU PROBE (prints a few SpatialParams + first 2 forcing samples) ---!!! 
+__global__ void gpu_quick_probe(const SpatialParams* sp,
+                                const float* d_forc,
+                                const size_t* c_forc_nT_dev,
+                                const double* c_forc_dt_dev,
+                                int nForc, int systems,
+                                int first_sys, int count_sys)
+{
+    if (blockIdx.x || threadIdx.x) return;
+
+    int s0 = max(0, first_sys);
+    int s1 = min(systems, s0 + max(0, count_sys));
+
+    printf(">>> [GPU] QUICK PROBE: nForc=%d systems=%d range=[%d..%d)\n",
+           nForc, systems, s0, s1);
+
+    for (int s = s0; s < s1; ++s) {
+        const SpatialParams& P = sp[s];
+        printf("  [SP] sys=%d stream=%lld Hu=%.6g infil=%.6g perco=%.6g "
+               "lat=%.5f lon=%.5f slope=%.6g n=%.4g L=%.3f A_h=%.3f "
+               "a3=%.1f a4=%.1f melt_f=%.6g thr=%.3g c1=%.9g\n",
+               s, (long long)P.stream, P.Hu, P.infil, P.perco,
+               P.lat, P.lon, P.slope, P.n_mann, P.L, P.A_h,
+               P.alpha3, P.alpha4, P.melt_f, P.temp_thr, P.c1);
+
+        // print first up to 2 timesteps for each forcing for this system
+        size_t base = 0;
+        for (int f = 0; f < nForc; ++f) {
+            size_t nTf = c_forc_nT_dev[f];
+            double dt_hr = c_forc_dt_dev ? c_forc_dt_dev[f] : -1.0;
+            printf("    [F] f=%d nT=%llu dt_hr=%.3f\n",
+                   f, (unsigned long long)nTf, dt_hr);
+
+            size_t tmax = nTf < 2 ? nTf : 2;
+            for (size_t t = 0; t < tmax; ++t) {
+                size_t idx = base + t * (size_t)systems + (size_t)s;
+                float v = d_forc[idx];
+                printf("      t=%llu val=%g (idx=%llu)\n",
+                       (unsigned long long)t, (double)v, (unsigned long long)idx);
+            }
+            base += nTf * (size_t)systems;
+        }
+    }
+    printf(">>> [GPU] END PROBE\n");
+}
+
 
 
 // ───────── Loop over a single simulation year ─────────
@@ -623,6 +670,44 @@ void simulateChunk(const ModelConfig& config,
     // ───────── Copy forcings to device ─────────
     uploadForcingsToGpu(forcingChunk);
     verifyDeviceForcingsHostSide(forcingChunk);   // round-trip check!!!
+
+    // --- DEBUG: quick GPU probe of first few SpatialParams + forcings ---
+    // ---- QUICK GPU PROBE: dump params + first 2 forcing samples for a few systems ----
+    // {
+    //     // Get device pointers/symbols
+    //     SpatialParams* d_sp = nullptr;
+    //     CUDA_CHECK(cudaMemcpyFromSymbol(&d_sp, devSpatialParamsPtr, sizeof(d_sp)));
+
+    //     float* d_forc_ptr = nullptr;
+    //     CUDA_CHECK(cudaMemcpyFromSymbol(&d_forc_ptr, d_forc_data, sizeof(d_forc_ptr)));
+
+    //     // Addresses of device-constant arrays as raw device pointers
+    //     size_t* d_c_forc_nT = nullptr;
+    //     CUDA_CHECK(cudaGetSymbolAddress((void**)&d_c_forc_nT, c_forc_nT));
+
+    //     double* d_c_forc_dt = nullptr;
+    //     CUDA_CHECK(cudaGetSymbolAddress((void**)&d_c_forc_dt, c_forc_dt));
+
+    //     int dev_nForc = 0;
+    //     CUDA_CHECK(cudaMemcpyFromSymbol(&dev_nForc, nForc, sizeof(int)));
+
+    //     // Safety
+    //     if (d_sp && d_forc_ptr && dev_nForc > 0) {
+    //         // Probe first 3 systems (adjust as needed)
+    //         int first_sys = 0;
+    //         int count_sys = std::min(3, static_cast<int>(forcingChunk.systems));
+    //         // (Optional) enlarge device printf buffer if you want to see more output
+    //         // CUDA_CHECK(cudaDeviceSetLimit(cudaLimitPrintfFifoSize, 8*1024*1024));
+
+    //         gpu_quick_probe<<<1,1>>>(d_sp, d_forc_ptr,
+    //                                 d_c_forc_nT, d_c_forc_dt,
+    //                                 dev_nForc, forcingChunk.systems,
+    //                                 first_sys, count_sys);
+    //         CUDA_CHECK(cudaDeviceSynchronize());
+    //     }
+    // }
+
+    // ------------------------------------------------------
     TimePoint t_input_end = Clock::now();
     logTimer("Input", elapsedSeconds(t_input_start, t_input_end));
 
@@ -813,33 +898,33 @@ void uploadForcingsToGpu(NCForcing& chunk) {
         throw std::runtime_error("No forcing data loaded for this chunk");
     }
 
-    // --- DEBUG: Scan host data for NaN/Inf values ---
-    {
-        auto scan = [](const float* a, size_t n, const char* name){
-            size_t bad=0, first=(size_t)-1;
-            float mn=INFINITY, mx=-INFINITY;
-            for(size_t i=0;i<n;i++){
-                float v=a[i];
-                if(!std::isfinite(v)){ bad++; if(first==(size_t)-1) first=i; }
-                else { if(v<mn) mn=v; if(v>mx) mx=v; }
-            }
-            if(bad){
-                std::fprintf(stderr,
-                "[NaNCHK] %s: %zu bad values; first idx=%zu\n", name, bad, first);
-                // Bail early so you know it’s inputs, not the kernel:
-                throw std::runtime_error("NaN/Inf detected in forcings");
-            } else {
-                std::fprintf(stderr,"[NaNCHK] %s: min=%g max=%g\n", name, (double)mn, (double)mx);
-            }
-        };
-        // pr is f=0, t2m is f=1; scan each forcing slab
-        size_t base = 0;
-        for(int f=0; f<chunk.nForc; ++f){
-            size_t count = (size_t)chunk.nT[f] * (size_t)chunk.systems;
-            scan(chunk.h_data.data()+base, count, f==0?"pr":"t2m");
-            base += count;
-        }
-    }
+    // --- DEBUG: Scan host data for NaN/Inf values --- !!! probably should keep but check later
+    // {
+    //     auto scan = [](const float* a, size_t n, const char* name){
+    //         size_t bad=0, first=(size_t)-1;
+    //         float mn=INFINITY, mx=-INFINITY;
+    //         for(size_t i=0;i<n;i++){
+    //             float v=a[i];
+    //             if(!std::isfinite(v)){ bad++; if(first==(size_t)-1) first=i; }
+    //             else { if(v<mn) mn=v; if(v>mx) mx=v; }
+    //         }
+    //         if(bad){
+    //             std::fprintf(stderr,
+    //             "[NaNCHK] %s: %zu bad values; first idx=%zu\n", name, bad, first);
+    //             // Bail early so you know it’s inputs, not the kernel:
+    //             throw std::runtime_error("NaN/Inf detected in forcings");
+    //         } else {
+    //             std::fprintf(stderr,"[NaNCHK] %s: min=%g max=%g\n", name, (double)mn, (double)mx);
+    //         }
+    //     };
+    //     // pr is f=0, t2m is f=1; scan each forcing slab
+    //     size_t base = 0;
+    //     for(int f=0; f<chunk.nForc; ++f){
+    //         size_t count = (size_t)chunk.nT[f] * (size_t)chunk.systems;
+    //         scan(chunk.h_data.data()+base, count, f==0?"pr":"t2m");
+    //         base += count;
+    //     }
+    // }
 
 
     // --- Make absolutely sure no kernels are still using the old buffer ---
@@ -1146,6 +1231,34 @@ int endYear(const ModelConfig& config) {
     return std::stoi(config.time_end.substr(0, 4));
 }
 
+inline void printSpatialParams(const SpatialParams& sp, std::ostream& os = std::cout) {
+    os << "=== DEBUG: SpatialParams ===\n";
+    os << "stream ID     : " << sp.stream << "\n";
+    os << "next_stream   : " << sp.next_stream << "\n";
+    os << "c1 (m/min per mm/hr): " << sp.c1 << "\n";
+
+    os << "Hu (m)        : " << sp.Hu << "\n";
+    os << "infil (m/min) : " << sp.infil << "\n";
+    os << "perco (m/min) : " << sp.perco << "\n";
+    os << "alpha3 (min)  : " << sp.alpha3 << "\n";
+    os << "alpha4 (min)  : " << sp.alpha4 << "\n";
+
+    os << "lat (deg)     : " << sp.lat << "\n";
+    os << "lon (deg)     : " << sp.lon << "\n";
+    os << "slope (m/m)   : " << sp.slope << "\n";
+    os << "n_mann        : " << sp.n_mann << "\n";
+    os << "L (m)         : " << sp.L << "\n";
+    os << "A_h (m^2)     : " << sp.A_h << "\n";
+
+    os << "sw (unitless) : " << sp.sw << "\n";
+    os << "ss (unitless) : " << sp.ss << "\n";
+
+    os << "melt_f (m/min/°C): " << sp.melt_f << "\n";
+    os << "temp_thr (°C) : " << sp.temp_thr << "\n";
+    os << "============================\n";
+}
+
+
 
 // ───────── Main function to run the RK45 solver on GPU ─────────
 int main(int argc, char** argv) {
@@ -1275,7 +1388,7 @@ if (!usingMPI) {
               << " systems (rows " << s << " .. " << (e ? e-1 : 0) << ")\n";
 }
 
-// === DEBUG: print first stream parameters to check overrides ===
+// === DEBUG: print first stream parameters to check overrides === !!!
 // if (!spatialParams.empty()) {
 //     const auto &sp = spatialParams.front();
 //     std::cout << "=== DEBUG: FIRST STREAM PARAMETERS ===\n";
@@ -1300,6 +1413,19 @@ if (config.initial_mode == "from_file") {
               << config.initial_file << "\n";
     load_initial_from_final_nc_serial(config.initial_file, streams);
 }
+
+// Checking spatial params of first stream !!!
+if (!streams.empty()) {
+    printSpatialParams(streams.front().sp);
+}
+
+// for (size_t i = 0; i < std::min<size_t>(5, streams.size()); ++i) { //!!!
+//     std::cout << "--- Stream index " << i 
+//               << " (ID=" << streams[i].sp.stream << ") ---\n";
+//     printSpatialParams(streams[i].sp);
+// }
+
+
 
 // Now upload and run
 setupGpu(spatialParams, streams);
