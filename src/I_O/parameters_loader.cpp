@@ -37,11 +37,11 @@ std::vector<SpatialParams> loadSpatialParams(const std::string& csv_path) {
         "hu",                     // → SpatialParams::Hu
         "centroid_lon",           // → SpatialParams::lon
         "centroid_lat",           // → SpatialParams::lat
-        "sw", "ss",
+        "sw", "ss",               //→ SpatialParams::sw, SpatialParams::ss 
         "n",                      // → SpatialParams::n_mann
-        "slope",
+        "slope",                  // → SpatialParams::slope
         "length_km",              // → SpatialParams::L
-        // "drainage_area_km2",      // → SpatialParams::A_i
+        // "drainage_area_km2",   // → SpatialParams::A_i
         "area_sqkm",              // → SpatialParams::A_h
         "melt",                   // → SpatialParams::melt_f
         "t_thres",                // → SpatialParams::temp_thr
@@ -99,7 +99,7 @@ std::vector<SpatialParams> loadSpatialParams(const std::string& csv_path) {
         p.L        = std::stod(fields[idx["length_km"]]);   // length of channel [km] 
         p.A_h      = std::stod(fields[idx["area_sqkm"]]); // area of hillslopes in [km²]
         // p.A_i = std::stod(fields[idx["drainage_area_km2"]]); // drainage area in [km²], don't need this parameter for runoff !!! remove it
-        p.melt_f   = std::stod(fields[idx["melt"]]); 
+        p.melt_f   = std::stod(fields[idx["melt"]]); // melt factor [mm/day/°C]
         p.temp_thr = std::stod(fields[idx["t_thres"]]); // temperature threshold for snowmelt [°C]
 
         double res_ss = std::stod(fields[idx["res_ss"]]); // residence time in subsurface tank [days]

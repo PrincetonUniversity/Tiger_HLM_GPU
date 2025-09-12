@@ -2,6 +2,17 @@
 
 #include "../solver/rk45.h"
 #include <cmath>
+// Portable finite check for host + device
+__host__ __device__ inline bool finite_val(double x) {
+#if defined(__CUDA_ARCH__)
+    // device build: use CUDA's global ::isfinite
+    return ::isfinite(x);
+#else
+    // host build: use C++ <cmath>
+    return std::isfinite(x);
+#endif
+}
+
 #include "ETmethods.hpp"          // for ETMethods::HamonPET, ETMethods::ETactual
 #include "soiltemp.hpp"           // for SoilTemp::soiltemp
 #include "../I_O/parameters_loader.hpp"  // for SpatialParams
@@ -78,7 +89,7 @@ struct Runoff5
         double h_stat      = fmax(0.0, y[STATE_STATIC]);
         double h_surf      = fmax(0.0, y[STATE_SURFACE]);
         double h_grav      = fmax(0.0, y[STATE_GRAV]);
-        double h_aq        = fmax(0.0, y[STATE_AQUIFER]); //update states when reach 0 !!!
+        double h_aq        = fmax(0.0, y[STATE_AQUIFER]); 
 
         // ── 1) unpack previous temperatures ───────────────────────
         double T_air_prev  = y[STATE_TEMP_AIR];
@@ -87,7 +98,7 @@ struct Runoff5
         // ── 2) spatial params ────────────────────────────────────
         const auto &P   = sp_ptr[sys];
         double c1       = P.c1;      // mm/hr → m/min
-        double Hu       = P.Hu;// depth of static tank [mm]
+        double Hu       = P.Hu; // depth of static tank [m], converted from mm to m in parameters_loader.cpp
         double infil    = P.infil; // i2 * p.c1;  // infiltration rate [m/min]
         double perco    = P.perco; // i3 * p.c1;  // percolation rate to aquifer [m/min]
         double lat      = P.lat; // hillslope latitude in degrees for PET calculation [unitless]
@@ -100,13 +111,15 @@ struct Runoff5
         double A_h      = P.A_h; // area of hillslopes in [m²]
         double alpha3   = P.alpha3; // res_ss * 24.0 * 60.0; //days → minutes
         double alpha4   = P.alpha4; // res_gw * 24.0 * 60.0; //days → minutes
-        double melt_f   = P.melt_f; 
-        double temp_thr = P.temp_thr;
+        double melt_f   = P.melt_f; // melt factor [m/day/°C] is what we passed to the model
+        double temp_thr = P.temp_thr; // temperature threshold for snowmelt [°C]
 
         // ── 3) forcings  ─────────────────────────────────────────
         //double c1         = 0.001/60.0;                   // mm/hr → m/min
-        double rainfall   = (nForc>0 ? F[0]*c1 : 0.0);
-        double temperature= (nForc>1 ? F[1]    : 0.0);
+        double rainfall    = (nForc>0 ? F[0]*c1 : 0.0);
+        double temperature = (nForc>1 ? F[1]    : 0.0);
+        if (!finite_val(rainfall))    rainfall = 0.0; // only NaN/±Inf → 0
+        if (!finite_val(temperature)) temperature = 0.0; // only NaN/±Inf → 0
         double doy        = 1.0 + t/1440.0;
 
         // ── 4) compute ET for static tank─────────────────────
@@ -117,31 +130,17 @@ struct Runoff5
 
         // ── 5) soil‐temperature & freeze flag ────────────────────
         double soil_temp = T_soil_prev;
-        if (temperature != T_air_prev) {
+        // if (temperature != T_air_prev) // temperature has changed
+        // Use a tolerance to avoid float-equality traps
+        constexpr double TEMP_EPS = 1e-6;
+        if (fabs(temperature - T_air_prev) > TEMP_EPS) {
             soil_temp = soiltemp(temperature, T_soil_prev, h_snow);
-            
         }
         bool frozen_ground = (soil_temp <= 0.0);
 
         // ── 6) temperature‐state derivatives ────────────────────
         dydt[STATE_TEMP_AIR ] = - T_air_prev + temperature;
         dydt[STATE_TEMP_SOIL] = - T_soil_prev + soil_temp;
-
-        // ── 7) snow tank ──────────────────────────────────────
-        // double x1 = 0.0;
-        // if (temperature == 0.0) {
-        //     x1 = rainfall;
-        //     dydt[STATE_SNOW] = 0.0;
-        // }
-        // else if (temperature < temp_thr) {
-        //     x1 = 0.0;
-        //     dydt[STATE_SNOW] = rainfall;
-        // }
-        // else {
-        //     double snowmelt = fmin(h_snow, temperature * melt_f);
-        //     x1 = rainfall + snowmelt;
-        //     dydt[STATE_SNOW] = -snowmelt;
-        // }
 
         // ── 7) snow tank new ────────────────────────────────────── 
         double x1 = 0.0;
@@ -151,7 +150,7 @@ struct Runoff5
             // If temperature is below accumulation threshold, all rainfall accumulates as snow  
             x1 = 0.0;
             dydt[STATE_SNOW] = rainfall;
-            //Accumulate precip as snow and melt out
+            // Accumulate precip as snow and melt out
             if (temperature > melt_thr){
                 double snowmelt = fmin(h_snow, temperature * melt_f);
                 x1 = snowmelt;
@@ -159,10 +158,10 @@ struct Runoff5
             }                     
         }
         else if (temperature >= temp_thr){ 
-            //default for tmp< mlt_thr
+            // Default for tmp< mlt_thr
             x1 = rainfall;
             dydt[STATE_SNOW] = 0;
-            //default for tmp>= mlt_thr
+            // Default for tmp>= mlt_thr
             if (temperature > melt_thr){
                 double snowmelt = fmin(h_snow, temperature * melt_f);
                 x1 = rainfall + snowmelt;
