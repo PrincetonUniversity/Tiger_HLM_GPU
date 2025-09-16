@@ -45,7 +45,7 @@ namespace fs = std::filesystem;
 
 // MPI & Timing Utilities
 #include <mpi.h>                   
-#include "chrono"                  
+#include <chrono>                  
 
 
 
@@ -602,7 +602,32 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
 }
 
 
-// ───────── Dynamically compute how many days per chunk fit in memory ─────────
+// // ───────── Dynamically compute how many days per chunk fit in memory ─────────
+// int computeDaysPerChunk(int num_systems, const ModelConfig& config) {
+//     const double usable_bytes =
+//         config.max_gpu_mem_gb *
+//         (1.0 - config.gpu_mem_buffer_pct / 100.0) *
+//         1024.0 * 1024.0 * 1024.0;
+
+//     const int N_EQ = Runoff5::N_EQ;
+//     double max_chunk_days =
+//         (usable_bytes / (4.0 * N_EQ * num_systems) - 1.0) / 24.0;
+
+//     int days = std::max(1, static_cast<int>(std::floor(max_chunk_days)));
+
+//     // ---- Logging ----
+//     std::ostringstream oss;
+//     oss << std::fixed << std::setprecision(2)
+//         << "Total memory = " << config.max_gpu_mem_gb << " GiB\n"
+//         << "Buffer reserved = " << config.gpu_mem_buffer_pct << "%\n"
+//         << "Usable memory = "
+//         << (usable_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB\n"
+//         << "Estimated DAYS_PER_CHUNK = " << days;
+//     logGpu(oss.str());
+
+//     return days;
+// }
+
 int computeDaysPerChunk(int num_systems, const ModelConfig& config) {
     const double usable_bytes =
         config.max_gpu_mem_gb *
@@ -610,18 +635,28 @@ int computeDaysPerChunk(int num_systems, const ModelConfig& config) {
         1024.0 * 1024.0 * 1024.0;
 
     const int N_EQ = Runoff5::N_EQ;
-    double max_chunk_days =
-        (usable_bytes / (4.0 * N_EQ * num_systems) - 1.0) / 24.0;
 
-    int days = std::max(1, static_cast<int>(std::floor(max_chunk_days)));
+    // Use the single source of truth
+    double qdt = GLOBAL_QUERY_DT;
+    if (!std::isfinite(qdt) || qdt <= 0.0) qdt = 60.0;
+    if (qdt > 1440.0) qdt = 1440.0;
 
-    // ---- Logging ----
+    const double samples_per_day = 1440.0 / qdt;
+
+    // Dense output estimate (float)
+    const double bytes_per_day_dense =
+        double(num_systems) * double(N_EQ) * samples_per_day * sizeof(float);
+
+    // Keep a little slack (-1 day)
+    const double safe = std::max(1.0, bytes_per_day_dense);
+    int days = std::max(1, static_cast<int>(std::floor(usable_bytes / safe - 1.0)));
+
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2)
         << "Total memory = " << config.max_gpu_mem_gb << " GiB\n"
         << "Buffer reserved = " << config.gpu_mem_buffer_pct << "%\n"
-        << "Usable memory = "
-        << (usable_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB\n"
+        << "Usable memory = " << (usable_bytes / (1024.0*1024.0*1024.0)) << " GiB\n"
+        << "Query interval = " << qdt << " min (" << samples_per_day << " samples/day)\n"
         << "Estimated DAYS_PER_CHUNK = " << days;
     logGpu(oss.str());
 
@@ -1327,12 +1362,24 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMemcpyToSymbol(devParams, &hostP, sizeof(hostP)));
     }
 
-    GLOBAL_QUERY_DT = config.query_dt_minutes;   // set from YAML
-    if (GLOBAL_QUERY_DT > 1440.0) {
-        std::cout << "[WARN] query_dt in config (" << GLOBAL_QUERY_DT 
-                << " min) exceeds max allowed 1 day (1440 mins). Using 1440 mins.\n";
-        GLOBAL_QUERY_DT = 1440.0;
+
+    // Set GLOBAL_QUERY_DT from config, default-safe and clamped
+    {
+        double qdt = config.query_dt_minutes; // already defaults to 60.0 if key missing
+        if (!std::isfinite(qdt) || qdt <= 0.0) {
+            std::cout << "[WARN] output.query_dt is missing/invalid (" << qdt
+                    << "). Using default 60.0 minutes.\n";
+            qdt = 60.0;
+        }
+        if (qdt > 1440.0) {
+            std::cout << "[WARN] output.query_dt (" << qdt
+                    << " min) exceeds 1 day. Clamping to 1440.0 minutes.\n";
+            qdt = 1440.0;
+        }
+        GLOBAL_QUERY_DT = qdt;
+        std::cout << "[CONFIG] Query output interval = " << GLOBAL_QUERY_DT << " minutes\n";
     }
+
 
 
     // Check if user has enabled MPI via config

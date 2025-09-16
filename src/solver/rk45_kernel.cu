@@ -143,6 +143,8 @@ __global__ void rk45_then_radau_multi(
                 if (tq > t) {
                     double th = (tq - t)/h, yd[N_EQ];
                     rk45_dense<Runoff5>(y, k45, N_EQ, h, th, yd);
+                    Runoff5::project_nonnegative(yd);   // clamp the interpolated sample
+                    // Store the dense output in the global array
                     for (int c=0; c<N_EQ; ++c){
                         DBG_ASSERT(sys < num_systems, "Invalid system index sys=%d", sys);
                         DBG_ASSERT(next_q < num_queries, "Invalid query index next_q=%d", next_q);
@@ -160,6 +162,9 @@ __global__ void rk45_then_radau_multi(
 
                 ++next_q;
             }
+
+            Runoff5::project_nonnegative(y_next);   // clamp the state you will carry forward
+            // accept step
             for (int i=0; i<N_EQ; ++i) y[i] = y_next[i];
             t = t1;
             double fac = devParams.safety * pow(1.0/(err + 1e-16), 0.2);
@@ -182,7 +187,8 @@ __global__ void rk45_then_radau_multi(
         d_stiff[sys] = 1;  // mark this system as stiff
         return;
     }
-
+    
+    Runoff5::project_nonnegative(y);  // final clamp
     // ─── 3) Never stiff: write final RK45 state ───
     for (int i=0; i<N_EQ; ++i) {
         y_final_all[sys*N_EQ + i] = y[i];
