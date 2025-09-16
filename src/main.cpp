@@ -1349,19 +1349,6 @@ int main(int argc, char** argv) {
     }
 
 
-    {// ─ Set up GPU solver parameters from config ──
-        Runoff5::Parameters hostP;
-        hostP.rtol        = config.rtol;
-        hostP.atol        = config.atol;
-        hostP.safety      = config.safety;
-        hostP.minScale    = config.min_scale;
-        hostP.maxScale    = config.max_scale;
-        hostP.initialStep = config.initial_step;
-
-        // push into GPU constant memory
-        CUDA_CHECK(cudaMemcpyToSymbol(devParams, &hostP, sizeof(hostP)));
-    }
-
 
     // Set GLOBAL_QUERY_DT from config, default-safe and clamped
     {
@@ -1434,6 +1421,62 @@ if (!usingMPI) {
               << " handling " << spatialParams.size()
               << " systems (rows " << s << " .. " << (e ? e-1 : 0) << ")\n";
 }
+
+// {// ─ Set up GPU solver parameters from config ──
+    //     Runoff5::Parameters hostP;
+    //     hostP.rtol        = config.rtol;
+    //     hostP.atol        = config.atol;
+    //     hostP.safety      = config.safety;
+    //     hostP.minScale    = config.min_scale;
+    //     hostP.maxScale    = config.max_scale;
+    //     hostP.initialStep = config.initial_step;
+
+    //     // push into GPU constant memory
+    //     CUDA_CHECK(cudaMemcpyToSymbol(devParams, &hostP, sizeof(hostP)));
+    // }
+
+    {// ─ Set up GPU solver parameters from config ──
+        Runoff5::Parameters hostP;
+        // Start with model defaults (match struct defaults)
+        hostP.rtol        = 1e-6;
+        hostP.atol        = 1e-9;
+        hostP.safety      = 0.9;
+        hostP.minScale    = 0.2;
+        hostP.maxScale    = 10.0;
+        hostP.initialStep = 0.01;
+
+        // If user asked to override tolerances, apply them
+        if (config.override_tolerances) {
+            if (std::isfinite(config.rtol) && config.rtol > 0) hostP.rtol = config.rtol;
+            if (std::isfinite(config.atol) && config.atol > 0) hostP.atol = config.atol;
+            if (std::isfinite(config.safety) && config.safety > 0) hostP.safety = config.safety;
+            if (std::isfinite(config.min_scale) && config.min_scale > 0) hostP.minScale = config.min_scale;
+            if (std::isfinite(config.max_scale) && config.max_scale >= hostP.minScale) hostP.maxScale = config.max_scale;
+        }
+
+        // If user asked to override initial step, apply it
+        if (config.override_initial_step) {
+            if (std::isfinite(config.initial_step) && config.initial_step > 0) {
+                hostP.initialStep = config.initial_step;
+            }
+        }
+
+        // Optional: log what we actually use
+        std::ostringstream oss;
+        oss << std::scientific << std::setprecision(2)
+            << "rtol=" << hostP.rtol << " atol=" << hostP.atol
+            << std::fixed
+            << " safety=" << hostP.safety
+            << " minScale=" << hostP.minScale
+            << " maxScale=" << hostP.maxScale
+            << " initialStep=" << hostP.initialStep
+            << (config.override_tolerances ? " [tols:override]" : " [tols:default]")
+            << (config.override_initial_step ? " [h0:override]" : " [h0:default]");
+        logGpu(std::string("Solver params → ") + oss.str());
+
+        // Push to device
+        CUDA_CHECK(cudaMemcpyToSymbol(devParams, &hostP, sizeof(hostP)));
+    }
 
 // === DEBUG: print first stream parameters to check overrides === !!!
 // if (!spatialParams.empty()) {

@@ -534,14 +534,31 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     config.runoff_output_file = parser.getString("output.runoff_output_file");
     
     // Load solver
-    config.rtol = parser.getDouble("solver.rtol");
-    config.atol = parser.getDouble("solver.atol");
-    config.safety = parser.getDouble("solver.safety");
-    config.min_scale = parser.getDouble("solver.min_scale");
-    config.max_scale = parser.getDouble("solver.max_scale");
-    config.override_tolerances = parser.getBool("solver.override_tolerances");
-    config.initial_step = parser.getDouble("solver.initial_step");
-    config.override_initial_step = parser.getBool("solver.override_initial_step");
+    // config.rtol = parser.getDouble("solver.rtol");
+    // config.atol = parser.getDouble("solver.atol");
+    // config.safety = parser.getDouble("solver.safety");
+    // config.min_scale = parser.getDouble("solver.min_scale");
+    // config.max_scale = parser.getDouble("solver.max_scale");
+    // config.override_tolerances = parser.getBool("solver.override_tolerances");
+    // config.initial_step = parser.getDouble("solver.initial_step");
+    // config.override_initial_step = parser.getBool("solver.override_initial_step");
+
+    // Solver (provide defaults = current hard-coded values)
+    config.rtol                 = parser.getDouble("solver.rtol",        1e-6);
+    config.atol                 = parser.getDouble("solver.atol",        1e-9);
+    config.safety               = parser.getDouble("solver.safety",      0.9);
+    if (config.safety > 1.0) {
+        std::cerr << "Warning: solver.safety (" << config.safety
+                << ") is greater than 1.0. Clamping to 1.0." << std::endl;
+        config.safety = 1.0;
+    }
+    config.min_scale            = parser.getDouble("solver.min_scale",   0.2);
+    config.max_scale            = parser.getDouble("solver.max_scale",   10.0);
+    config.initial_step         = parser.getDouble("solver.initial_step",0.01);
+
+    // Override flags default to false
+    config.override_tolerances  = parser.getBool("solver.override_tolerances",  false);
+    config.override_initial_step= parser.getBool("solver.override_initial_step",false);
     
     // Load flags
     config.use_mpi = parser.getBool("flags.use_mpi", false);
