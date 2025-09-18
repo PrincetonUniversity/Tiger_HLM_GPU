@@ -45,7 +45,7 @@ namespace fs = std::filesystem;
 
 // MPI & Timing Utilities
 #include <mpi.h>                   
-#include "chrono"                  
+#include <chrono>                  
 
 
 
@@ -602,7 +602,32 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
 }
 
 
-// ───────── Dynamically compute how many days per chunk fit in memory ─────────
+// // ───────── Dynamically compute how many days per chunk fit in memory ─────────
+// int computeDaysPerChunk(int num_systems, const ModelConfig& config) {
+//     const double usable_bytes =
+//         config.max_gpu_mem_gb *
+//         (1.0 - config.gpu_mem_buffer_pct / 100.0) *
+//         1024.0 * 1024.0 * 1024.0;
+
+//     const int N_EQ = Runoff5::N_EQ;
+//     double max_chunk_days =
+//         (usable_bytes / (4.0 * N_EQ * num_systems) - 1.0) / 24.0;
+
+//     int days = std::max(1, static_cast<int>(std::floor(max_chunk_days)));
+
+//     // ---- Logging ----
+//     std::ostringstream oss;
+//     oss << std::fixed << std::setprecision(2)
+//         << "Total memory = " << config.max_gpu_mem_gb << " GiB\n"
+//         << "Buffer reserved = " << config.gpu_mem_buffer_pct << "%\n"
+//         << "Usable memory = "
+//         << (usable_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB\n"
+//         << "Estimated DAYS_PER_CHUNK = " << days;
+//     logGpu(oss.str());
+
+//     return days;
+// }
+
 int computeDaysPerChunk(int num_systems, const ModelConfig& config) {
     const double usable_bytes =
         config.max_gpu_mem_gb *
@@ -610,18 +635,28 @@ int computeDaysPerChunk(int num_systems, const ModelConfig& config) {
         1024.0 * 1024.0 * 1024.0;
 
     const int N_EQ = Runoff5::N_EQ;
-    double max_chunk_days =
-        (usable_bytes / (4.0 * N_EQ * num_systems) - 1.0) / 24.0;
 
-    int days = std::max(1, static_cast<int>(std::floor(max_chunk_days)));
+    // Use the single source of truth
+    double qdt = GLOBAL_QUERY_DT;
+    if (!std::isfinite(qdt) || qdt <= 0.0) qdt = 60.0;
+    if (qdt > 1440.0) qdt = 1440.0;
 
-    // ---- Logging ----
+    const double samples_per_day = 1440.0 / qdt;
+
+    // Dense output estimate (float)
+    const double bytes_per_day_dense =
+        double(num_systems) * double(N_EQ) * samples_per_day * sizeof(float);
+
+    // Keep a little slack (-1 day)
+    const double safe = std::max(1.0, bytes_per_day_dense);
+    int days = std::max(1, static_cast<int>(std::floor(usable_bytes / safe - 1.0)));
+
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2)
         << "Total memory = " << config.max_gpu_mem_gb << " GiB\n"
         << "Buffer reserved = " << config.gpu_mem_buffer_pct << "%\n"
-        << "Usable memory = "
-        << (usable_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB\n"
+        << "Usable memory = " << (usable_bytes / (1024.0*1024.0*1024.0)) << " GiB\n"
+        << "Query interval = " << qdt << " min (" << samples_per_day << " samples/day)\n"
         << "Estimated DAYS_PER_CHUNK = " << days;
     logGpu(oss.str());
 
@@ -1314,25 +1349,24 @@ int main(int argc, char** argv) {
     }
 
 
-    {// ─ Set up GPU solver parameters from config ──
-        Runoff5::Parameters hostP;
-        hostP.rtol        = config.rtol;
-        hostP.atol        = config.atol;
-        hostP.safety      = config.safety;
-        hostP.minScale    = config.min_scale;
-        hostP.maxScale    = config.max_scale;
-        hostP.initialStep = config.initial_step;
 
-        // push into GPU constant memory
-        CUDA_CHECK(cudaMemcpyToSymbol(devParams, &hostP, sizeof(hostP)));
+    // Set GLOBAL_QUERY_DT from config, default-safe and clamped
+    {
+        double qdt = config.query_dt_minutes; // already defaults to 60.0 if key missing
+        if (!std::isfinite(qdt) || qdt <= 0.0) {
+            std::cout << "[WARN] output.query_dt is missing/invalid (" << qdt
+                    << "). Using default 60.0 minutes.\n";
+            qdt = 60.0;
+        }
+        if (qdt > 1440.0) {
+            std::cout << "[WARN] output.query_dt (" << qdt
+                    << " min) exceeds 1 day. Clamping to 1440.0 minutes.\n";
+            qdt = 1440.0;
+        }
+        GLOBAL_QUERY_DT = qdt;
+        std::cout << "[CONFIG] Query output interval = " << GLOBAL_QUERY_DT << " minutes\n";
     }
 
-    GLOBAL_QUERY_DT = config.query_dt_minutes;   // set from YAML
-    if (GLOBAL_QUERY_DT > 1440.0) {
-        std::cout << "[WARN] query_dt in config (" << GLOBAL_QUERY_DT 
-                << " min) exceeds max allowed 1 day (1440 mins). Using 1440 mins.\n";
-        GLOBAL_QUERY_DT = 1440.0;
-    }
 
 
     // Check if user has enabled MPI via config
@@ -1387,6 +1421,62 @@ if (!usingMPI) {
               << " handling " << spatialParams.size()
               << " systems (rows " << s << " .. " << (e ? e-1 : 0) << ")\n";
 }
+
+// {// ─ Set up GPU solver parameters from config ──
+    //     Runoff5::Parameters hostP;
+    //     hostP.rtol        = config.rtol;
+    //     hostP.atol        = config.atol;
+    //     hostP.safety      = config.safety;
+    //     hostP.minScale    = config.min_scale;
+    //     hostP.maxScale    = config.max_scale;
+    //     hostP.initialStep = config.initial_step;
+
+    //     // push into GPU constant memory
+    //     CUDA_CHECK(cudaMemcpyToSymbol(devParams, &hostP, sizeof(hostP)));
+    // }
+
+    {// ─ Set up GPU solver parameters from config ──
+        Runoff5::Parameters hostP;
+        // Start with model defaults (match struct defaults)
+        hostP.rtol        = 1e-6;
+        hostP.atol        = 1e-9;
+        hostP.safety      = 0.9;
+        hostP.minScale    = 0.2;
+        hostP.maxScale    = 10.0;
+        hostP.initialStep = 0.01;
+
+        // If user asked to override tolerances, apply them
+        if (config.override_tolerances) {
+            if (std::isfinite(config.rtol) && config.rtol > 0) hostP.rtol = config.rtol;
+            if (std::isfinite(config.atol) && config.atol > 0) hostP.atol = config.atol;
+            if (std::isfinite(config.safety) && config.safety > 0) hostP.safety = config.safety;
+            if (std::isfinite(config.min_scale) && config.min_scale > 0) hostP.minScale = config.min_scale;
+            if (std::isfinite(config.max_scale) && config.max_scale >= hostP.minScale) hostP.maxScale = config.max_scale;
+        }
+
+        // If user asked to override initial step, apply it
+        if (config.override_initial_step) {
+            if (std::isfinite(config.initial_step) && config.initial_step > 0) {
+                hostP.initialStep = config.initial_step;
+            }
+        }
+
+        // Optional: log what we actually use
+        std::ostringstream oss;
+        oss << std::scientific << std::setprecision(2)
+            << "rtol=" << hostP.rtol << " atol=" << hostP.atol
+            << std::fixed
+            << " safety=" << hostP.safety
+            << " minScale=" << hostP.minScale
+            << " maxScale=" << hostP.maxScale
+            << " initialStep=" << hostP.initialStep
+            << (config.override_tolerances ? " [tols:override]" : " [tols:default]")
+            << (config.override_initial_step ? " [h0:override]" : " [h0:default]");
+        logGpu(std::string("Solver params → ") + oss.str());
+
+        // Push to device
+        CUDA_CHECK(cudaMemcpyToSymbol(devParams, &hostP, sizeof(hostP)));
+    }
 
 // === DEBUG: print first stream parameters to check overrides === !!!
 // if (!spatialParams.empty()) {

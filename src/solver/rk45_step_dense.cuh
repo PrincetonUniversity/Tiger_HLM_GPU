@@ -251,9 +251,11 @@ __device__ void rk45_dense(
         // y_dense[i] = y_n[i] + h * poly
         y_dense[i] = y_n[i] + h * poly;
     }
+    
 
 
 }
+
 
 
 
