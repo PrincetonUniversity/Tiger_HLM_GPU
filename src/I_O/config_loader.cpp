@@ -226,12 +226,20 @@ void SimpleYamlParser::parseLines(const std::vector<std::string>& lines) {
                 std::string fullKey = getSectionKey(fullPath);
                 
                 // Check if the value is an inline array
-                if (isInlineArray(value)) {
-                    std::vector<std::string> arrayItems = parseInlineArray(value);
+                // if (isInlineArray(value)) {
+                //     std::vector<std::string> arrayItems = parseInlineArray(value);
+                //     simpleArrayMap[fullKey] = arrayItems;
+                // } else {
+                //     keyValueMap[fullKey] = removeQuotes(value);
+                // }
+                // Check if the value is an inline array — USE cleanValue, not value
+                if (isInlineArray(cleanValue)) {
+                    std::vector<std::string> arrayItems = parseInlineArray(cleanValue);
                     simpleArrayMap[fullKey] = arrayItems;
                 } else {
-                    keyValueMap[fullKey] = removeQuotes(value);
+                    keyValueMap[fullKey] = removeQuotes(cleanValue);
                 }
+
             }
         }
     }
@@ -349,6 +357,8 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     SimpleYamlParser parser;
     parser.parseFile(filename);
     // parser.printParsedData();  // DEBUG output of all parsed keys
+    std::cerr << "[CFG] Loaded config: " << filename << "\n";
+    parser.printParsedData(); // TEMP: shows keys and arrays
     
     ModelConfig config;
 
@@ -563,7 +573,7 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     // Load flags
     config.use_mpi = parser.getBool("flags.use_mpi", false);
     config.max_gpu_mem_gb     = parser.getDouble("flags.max_gpu_mem_gb", 15.0); // Default to 15 GiB
-    config.gpu_mem_buffer_pct = parser.getDouble("flags.gpu_mem_buffer_pct", 15.0); // Default to 15%
+    config.gpu_mem_buffer_pct = parser.getDouble("flags.gpu_mem_buffer_pct", 5.0); // Default to 5%
     if (config.max_gpu_mem_gb <= 0.0) {
         throw std::runtime_error(
             "You must set flags.max_gpu_mem_gb > 0 in your config YAML (GiB)."
