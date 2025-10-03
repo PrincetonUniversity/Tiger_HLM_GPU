@@ -357,8 +357,8 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     SimpleYamlParser parser;
     parser.parseFile(filename);
     // parser.printParsedData();  // DEBUG output of all parsed keys
-    std::cerr << "[CFG] Loaded config: " << filename << "\n";
-    parser.printParsedData(); // TEMP: shows keys and arrays
+    // std::cerr << "[CFG] Loaded config: " << filename << "\n";
+    // parser.printParsedData(); // TEMP: shows keys and arrays
     
     ModelConfig config;
 
