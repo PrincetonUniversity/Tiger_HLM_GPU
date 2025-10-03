@@ -17,12 +17,12 @@ initial:
   values: [0.01, 0.1, 0.0, 0.1, 0.01, 1.0, 1.0, 0.0, 0.0]  # Initial values for each state variable (if mode is "constant")
 
 parameters:
-  path: "data/Stony_Brook/" # Change path your input directory    # Directory where parameter files live
+  path: "./data/Stony_Brook/" # Change path your input directory    # Directory where parameter files live
   spatially_varying_file: "Stony_Brook_spatial_params.csv"        # CSV file with per-link parameters
 
 forcings:
   type: "yearly"                 # Input format for forcings ("netcdf", could support others)
-  path: "data/Stony_Brook/"   # Directory containing NetCDF forcing files
+  path: "./data/Stony_Brook/"   # Directory containing NetCDF forcing files
   time_chunking: true            # Whether to load forcing data in chunks (useful for long time periods)
 
   variables:
@@ -43,7 +43,7 @@ forcings:
       dims: "time, latitude, longitude"      # Dimensions of the variable in the NetCDF file
 
 forcing_mappings:
-  path: "data/Stony_Brook/" # Change path your input directory   # Path to lookup files that map stream ID → lat/lon
+  path: "./data/Stony_Brook/" # Change path your input directory   # Path to lookup files that map stream ID → lat/lon
   variables:
     - name: "pr"                                 # Must match name in `forcings.variables`
       file: "Stony_Brook_pr_AORC_lookup.csv"     # CSV with stream ID → lat/lon gridpoint
@@ -64,7 +64,7 @@ solver:
   atol: 1e-9                     # Absolute tolerance for ODE solver
   safety: 0.9                    # Safety factor for adaptive time step scaling
   min_scale: 0.2                 # Minimum allowed scaling for time step reduction
-  max_scale: 10.0                # Maximum allowed scaling for time step growth
+  max_scale: 3.0                # Maximum allowed scaling for time step growth
   override_tolerances: true      # If true, forces the use of rtol/atol here
   initial_step: 0.001            # Suggested initial time step (in minutes)
   override_initial_step: true    # If true, overrides automatic h0 guess with this value
@@ -72,4 +72,4 @@ solver:
 flags:
   use_mpi: false                  # Set to false to disable MPI and run in serial
   max_gpu_mem_gb: 95          # Total GPU memory in GiB
-  gpu_mem_buffer_pct: 15      # Reserve 15% as safety buffer
+  gpu_mem_buffer_pct: 5      # Reserve 15% as safety buffer
