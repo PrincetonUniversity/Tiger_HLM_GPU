@@ -81,7 +81,11 @@ struct Runoff5
         // temperatures & runoff states are not projected
     }
 
-
+    // ---- my way to ensure non-negative states ----
+    __host__ __device__ static inline double ensure_non_negative(double x) {
+        return (x < 1e-12 ? 0.0 : x);
+    }
+    // -----------------------------------------------
 
     __host__ __device__
     static void rhs(double t,
@@ -95,12 +99,14 @@ struct Runoff5
     {
     
 
-        // ── 0) unpack & set states ─────────────────────────────
-        double h_snow      = fmax(0.0, y[STATE_SNOW]);
-        double h_stat      = fmax(0.0, y[STATE_STATIC]);
-        double h_surf      = fmax(0.0, y[STATE_SURFACE]);
-        double h_grav      = fmax(0.0, y[STATE_GRAV]);
-        double h_aq        = fmax(0.0, y[STATE_AQUIFER]); 
+        // ── 0) unpack & set states ──────────────────────────────
+        // ensure non-negative states 
+        double h_snow = ensure_non_negative(y[STATE_SNOW]);
+        double h_stat = ensure_non_negative(y[STATE_STATIC]);
+        double h_surf = ensure_non_negative(y[STATE_SURFACE]);
+        double h_grav = ensure_non_negative(y[STATE_GRAV]);
+        double h_aq   = ensure_non_negative(y[STATE_AQUIFER]);
+        // ───────────────────────────────────────────────────────
 
         // ── 1) unpack previous temperatures ───────────────────────
         double T_air_prev  = y[STATE_TEMP_AIR];
@@ -110,8 +116,8 @@ struct Runoff5
         const auto &P   = sp_ptr[sys];
         double c1       = P.c1;      // mm/hr → m/min
         double Hu       = P.Hu; // depth of static tank [m], converted from mm to m in parameters_loader.cpp
-        double infil    = P.infil; // i2 * p.c1;  // infiltration rate [m/min]
-        double perco    = P.perco; // i3 * p.c1;  // percolation rate to aquifer [m/min]
+        double infil    = P.infil;//4*0.001/60.0; //P.infil; // i2 * p.c1;  // infiltration rate [m/min]  4*0.001/60.0 doesnt work, divide by 10 one more time
+        double perco    = P.perco;//2.0*0.001/60.0; //P.perco; // i3 * p.c1;  // percolation rate to aquifer [m/min] 2.0*0.001/60.0 doesnt work, divide by 10 one more time
         double lat      = P.lat; // hillslope latitude in degrees for PET calculation [unitless]
         double sw       = P.sw; // relative soil moisture wilting point [unitless]
         double ss       = P.ss; // relative soil moisture point of stomatal closure [unitless]
@@ -127,7 +133,7 @@ struct Runoff5
 
         // ── 3) forcings  ─────────────────────────────────────────
         //double c1         = 0.001/60.0;                   // mm/hr → m/min
-        double rainfall    = (nForc>0 ? F[0]*c1 : 0.0);
+        double rainfall    = (nForc>0 ? F[0]*c1 : 0.0); // rainfall rate [m/min], convert from mm/hr to m/min
         double temperature = (nForc>1 ? F[1]    : 0.0);
         if (!finite_val(rainfall))    rainfall = 0.0; // only NaN/±Inf → 0
         if (!finite_val(temperature)) temperature = 0.0; // only NaN/±Inf → 0
@@ -136,11 +142,12 @@ struct Runoff5
         // ── 4) compute ET for static tank─────────────────────
         double pet    = HamonPET(temperature, lat, doy); // potential evapotranspiration [m/min]
         // double Emax   = fmin(pet, h_stat); // maximum possible evapotranspiration [m/min] from static tank, cannot be more than h1 [m]
-        double Emax = fmin(h_stat, fmax(0.0, pet));   // clamp PET, cap by storage
+        double pet_clamped = fmax(0.0, pet); // !!! clamp PET to non-negative
+        double Emax = fmin(h_stat, fmax(0.0, pet_clamped));   // clamp PET, cap by storage
 
         //double s_stat = h_stat/Hu; // relative soil moisture [unitless] !!!
         const double Hu_safe = fmax(1e-9, Hu);      // avoid divide-by-zero
-        double s_stat = h_stat / Hu_safe;
+        double s_stat = h_stat / Hu_safe;           // relative soil moisture [unitless]
         s_stat = fmin(1.0, fmax(0.0, s_stat));      // bound to [0,1]
         
         double out1   = ETactual(Emax, s_stat, sw, ss); // actual evapotranspiration [m/min] based on wilting point and stress factor
@@ -160,69 +167,32 @@ struct Runoff5
         dydt[STATE_TEMP_SOIL] = - T_soil_prev + soil_temp;
 
         // ── 7) snow tank new ────────────────────────────────────── 
-        double x1 = 0.0;
+        double x1 = 0.0;  
         double melt_thr = 0.0; // melt threshold
-        if (temperature < temp_thr)//temp_thr is the accumulation threshold
+    
+        if (temperature < temp_thr) // temp_thr is the accumulation threshold
         { 
             // If temperature is below accumulation threshold, all rainfall accumulates as snow  
-            x1 = 0.0;
+            x1 = 0.0; 
             dydt[STATE_SNOW] = rainfall;
             // Accumulate precip as snow and melt out
             if (temperature > melt_thr){
                 double snowmelt = fmin(h_snow, temperature * melt_f);
                 x1 = snowmelt;
-                dydt[STATE_SNOW] = -snowmelt; 
+                dydt[STATE_SNOW] = rainfall-snowmelt; // snowfall minus snowmelt
             }                     
         }
         else if (temperature >= temp_thr){ 
-            // Default for tmp< mlt_thr
+            // If temperature is above or equal to accumulation threshold, all rainfall is rain
             x1 = rainfall;
             dydt[STATE_SNOW] = 0;
-            // Default for tmp>= mlt_thr
+            // Melt snow if temperature is above melt threshold
             if (temperature > melt_thr){
                 double snowmelt = fmin(h_snow, temperature * melt_f);
                 x1 = rainfall + snowmelt;
                 dydt[STATE_SNOW] = -snowmelt;
             }
         }
-
-        // ── 7) Snow tank — conservative partition + capped melt ─────────────────────
-        // // Units: everything here is in [m/min].  In parameters_loader you already
-        // // converted:
-        // //    rainfall [mm/hr] → rainfall*c1 [m/min]
-        // //    melt_f [mm/day/°C] → [m/min/°C]
-        // // The role of this block is to produce:
-        // //   • dydt[STATE_SNOW]  = snowfall_in − melt_out
-        // //   • x1                = liquid water leaving snow (rain + melt) toward soil
-
-        // const double melt_thr = 0.0;           // degree-day melt activates above this [°C]
-
-        // // 7.1 Partition precip into snowfall vs rain using the accumulation threshold.
-        // //     All precip goes to snow when T < temp_thr; otherwise it stays liquid.
-        // const double pr_snow = (temperature < temp_thr ? rainfall : 0.0);   // [m/min]
-        // const double pr_rain = rainfall - pr_snow;                          // [m/min]
-
-        // // 7.2 Temperature-driven potential melt (degree-day).  We only melt when
-        // //     temperature is above melt_thr.  (melt_f is already [m/min/°C]).
-        // double melt_potential = 0.0;
-        // if (temperature > melt_thr) {
-        //     // degree-day melt = max(T - melt_thr, 0) * melt_f
-        //     melt_potential = (temperature - melt_thr) * melt_f;   // [m/min]
-        //     if (melt_potential < 0.0) melt_potential = 0.0;       // guard weird params
-        // }
-
-        // // 7.3 Do not melt more mass than exists.  Available snow during the step
-        // //     includes the current storage plus snowfall that lands as snow now.
-        // //     This keeps the derivative physically consistent (no negative snow).
-        // const double avail_snow = fmax(0.0, h_snow + pr_snow);    // [m]
-        // const double melt_eff   = fmin(avail_snow, melt_potential);
-
-        // // 7.4 Snow storage tendency and liquid water leaving the snow pack.
-        // //     • Snow gains pr_snow and loses melt_eff.
-        // //     • Downstream input x1 is ALL liquid: rain + melt.
-        // dydt[STATE_SNOW] = pr_snow - melt_eff;          // [m/min]
-        // const double x1  = pr_rain + melt_eff;          // [m/min] → used below
-
 
         // ── 8) static tank ─────────────────────────────────────
         double x2 = fmax(0.0, x1 + h_stat - Hu); // water that enters second storage (surface) tank [m/min]
@@ -237,6 +207,7 @@ struct Runoff5
 
         // ── 9) surface tank ────────────────────────────────────
         double infil_eff = (frozen_ground ? 0.0 : infil);
+
         double x3        = fmin(x2, infil_eff); // water that infiltrates to gravitational storage [m/min]
         double d2        = x2 - x3; // input to surface tank [m/min]
         double alfa2     = (1.0/n_mann) * pow(h_surf,2.0/3.0)*sqrt(slope);
@@ -252,24 +223,22 @@ struct Runoff5
         if (h_surf <= 0.0 && dydt[STATE_SURFACE] < 0.0) dydt[STATE_SURFACE] = 0.0;
 
         // ── 10) subsurface (gravitational) ──────────────────────
-        double x4   = fmin(x3, perco);
-        double d3   = x3 - x4;
+        // Previous verison:
+        double x4   = fmin(x3, perco); // water that percolates to aquifer [m/min]
+        double d3   = x3 - x4; 
 
-        // double out3 = (alpha3>=1.0 ? h_grav/alpha3 : 0.0);
         // linear reservoir outflow (min 0); cap to available storage
         double out3 = (alpha3 >= 1.0 ? h_grav / alpha3 : 0.0);
         out3 = fmin(out3, h_grav);
         if (!finite_val(out3) || out3 < 0.0) out3 = 0.0;
 
-        dydt[STATE_GRAV] = d3 - out3;
+        dydt[STATE_GRAV] = d3 - out3; 
 
         // POSITIVITY GUARD
         if (h_grav <= 0.0 && dydt[STATE_GRAV] < 0.0) dydt[STATE_GRAV] = 0.0;
 
         // ── 11) aquifer (groundwater) ─────────────────────────────
         double d4   = x4;
-
-        // double out4 = (alpha4>=1.0 ? h_aq/alpha4 : 0.0);
         // linear reservoir outflow (min 0); cap to available storage
         double out4 = (alpha4 >= 1.0 ? h_aq / alpha4 : 0.0);
         out4 = fmin(out4, h_aq);
@@ -280,11 +249,9 @@ struct Runoff5
         // POSITIVITY GUARD
         if (h_aq <= 0.0 && dydt[STATE_AQUIFER] < 0.0) dydt[STATE_AQUIFER] = 0.0;
 
-        // ── 12) surface and subsurface runoff ─────────────────────────────────
-        dydt[STATE_SURF_RUNOFF]    = - y[STATE_SURF_RUNOFF] + out2/c1; // [m/min] to [mm/hr]
-        // dydt[STATE_SUBSURF_RUNOFF] = out3 + out4; // instead save total runoff
-        double out_total = (out2 + out3 + out4) / c1; // instantaneous total runoff [mm/hr]
-        dydt[STATE_TOTAL_RUNOFF] = - y[STATE_TOTAL_RUNOFF] + out_total; // [m/min] to [mm/hr]
+        // ── 12) runoff diagnostics as CUMULATIVE depths (mm) ──────────────────
+        dydt[STATE_SURF_RUNOFF]  = (c1 > 0.0 ? out2 : 0.0);               // [m/min]
+        dydt[STATE_TOTAL_RUNOFF] = (c1 > 0.0 ? (out2 + out3 + out4): 0.0);  // [m/min]
 
 
 
