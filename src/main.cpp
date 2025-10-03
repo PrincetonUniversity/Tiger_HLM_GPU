@@ -16,6 +16,7 @@
 #include <iostream>     
 #include <ctime>        
 #include <filesystem>   
+#include <unordered_map>
 namespace fs = std::filesystem;  
 
 // CUDA & GPU Headers
@@ -65,7 +66,7 @@ using TimePoint = std::chrono::time_point<Clock>;
     cudaError_t err = (call);                                                 \
     if (err != cudaSuccess) {                                                 \
       std::fprintf(stderr,                                                    \
-        "[CUDA ERROR] %s:%d: “%s” failed → %s\n",                             \
+        "[CUDA ERROR] %s:%d: “%s” failed %s\n",                               \
         __FILE__, __LINE__, #call, cudaGetErrorString(err));                  \
       std::exit(1);                                                           \
     }                                                                         \
@@ -92,6 +93,9 @@ inline void sort_by_stream(std::vector<SpatialParams>& v) {
                   return a.stream < b.stream;
               });
 }
+
+// Print “[IC CHECK] …” only once across the whole run (and only on rank 0)
+static bool g_ic_printed_once = false;
 
 
 // check if the device has enough memory for the forcing data
@@ -405,6 +409,13 @@ std::vector<Stream<Runoff5>> buildStreams(const std::vector<SpatialParams>& para
     } else {
         // constant mode: prefer YAML values if present, else fallback to old default
         std::array<double, Runoff5::N_EQ> fallback = {0.01, 0.1, 0.0, 0.1, 0.01, 1, 1, 0, 0};
+        
+        // // ─────────DEBUG print initial values ────────────────────────────────────
+        // std::cerr << "[CFG] initial_mode=" << config.initial_mode
+        //         << " values.size=" << config.initial_values.size() << "\n";
+        // for (size_t i = 0; i < config.initial_values.size(); ++i)
+        //     std::cerr << "[CFG] values[" << i << "]=" << config.initial_values[i] << "\n";
+        // // ────────────────────────────────────────────────────────────────────────
 
         if (!config.initial_values.empty()) {
             for (int i = 0; i < Runoff5::N_EQ; ++i)
@@ -479,6 +490,37 @@ void setupGpu(const std::vector<SpatialParams>& spatialParams,
         std::fprintf(stderr, "cudaMemcpyToSymbol(devSpatialParamsPtr) failed: %s\n",
                      cudaGetErrorString(err));
         std::exit(1);
+    }
+}
+
+// Pretty print the query grid for one chunk
+static void logQueryGrid(const SolverInputs& in, const char* where) {
+    const double qdt = GLOBAL_QUERY_DT;          // minutes
+    const double span = in.tf - in.t0;           // minutes
+    const int    nq   = (int)in.h_query_times.size();
+    const double rem  = span - std::floor(span / qdt) * qdt;
+
+    std::cout << "[QGRID] (" << where << ") "
+              << "t0=" << in.t0 << " min, tf=" << in.tf << " min, "
+              << "Δ=" << qdt << " min, span=" << span << " min, "
+              << "nq=" << nq << ", remainder=" << rem << " min\n";
+
+    // Print first/last few query times
+    auto peek = [&](int i){
+        if (i >= 0 && i < nq) std::cout << "  t[" << i << "]=" << in.h_query_times[i] << " min\n";
+    };
+    if (nq > 0) {
+        peek(0);
+        if (nq > 1) peek(1);
+        if (nq > 2) peek(2);
+        if (nq > 5) {
+            std::cout << "  ... (" << nq-6 << " more) ...\n";
+        }
+        if (nq > 5) {
+            peek(nq-3); peek(nq-2); peek(nq-1);
+        } else {
+            for (int i = 3; i < nq; ++i) peek(i);
+        }
     }
 }
 
@@ -592,8 +634,22 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
 
         // simulateChunk(config, streams, year, dayOffset, daysThisChunk, rank, usingMPI);!!!
         // Determine if this is the last chunk of the year → include tf sample
-        bool include_tf = (dayOffset + daysThisChunk - 1) == end_day;
+        // bool include_tf = (dayOffset + daysThisChunk - 1) == end_day; //!!!
+        
+        // Always include the chunk-end sample (tf). Safe because queries start at t0+Δ.
+        // bool include_tf = true;
+        // const bool is_last_chunk = (dayOffset + daysThisChunk - 1) == end_day;
+        // bool include_tf = is_last_chunk;
+        bool include_tf = true;  // include the seam sample in every chunk
+
+        // DEBUG: log chunk info
+        std::cout << "[CHUNK DEBUG] Year " << year
+                << " offset=" << dayOffset
+                << " days=" << daysThisChunk
+                << " → include_tf=" << std::boolalpha << include_tf << "\n";
+
         simulateChunk(config, streams, year, dayOffset, daysThisChunk, rank, usingMPI, include_tf);
+
 
         // Advance date pointer for next chunk
         advanceDate(chunkStartYear, chunkStartMon, chunkStartDay, daysThisChunk);
@@ -601,40 +657,16 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
 
 }
 
-
-// // ───────── Dynamically compute how many days per chunk fit in memory ─────────
-// int computeDaysPerChunk(int num_systems, const ModelConfig& config) {
-//     const double usable_bytes =
-//         config.max_gpu_mem_gb *
-//         (1.0 - config.gpu_mem_buffer_pct / 100.0) *
-//         1024.0 * 1024.0 * 1024.0;
-
-//     const int N_EQ = Runoff5::N_EQ;
-//     double max_chunk_days =
-//         (usable_bytes / (4.0 * N_EQ * num_systems) - 1.0) / 24.0;
-
-//     int days = std::max(1, static_cast<int>(std::floor(max_chunk_days)));
-
-//     // ---- Logging ----
-//     std::ostringstream oss;
-//     oss << std::fixed << std::setprecision(2)
-//         << "Total memory = " << config.max_gpu_mem_gb << " GiB\n"
-//         << "Buffer reserved = " << config.gpu_mem_buffer_pct << "%\n"
-//         << "Usable memory = "
-//         << (usable_bytes / (1024.0 * 1024.0 * 1024.0)) << " GiB\n"
-//         << "Estimated DAYS_PER_CHUNK = " << days;
-//     logGpu(oss.str());
-
-//     return days;
-// }
-
+// ───────── Estimate DAYS_PER_CHUNK based on GPU memory ─────────
 int computeDaysPerChunk(int num_systems, const ModelConfig& config) {
+    const int N_EQ = Runoff5::N_EQ;
+    
     const double usable_bytes =
         config.max_gpu_mem_gb *
         (1.0 - config.gpu_mem_buffer_pct / 100.0) *
         1024.0 * 1024.0 * 1024.0;
 
-    const int N_EQ = Runoff5::N_EQ;
+    
 
     // Use the single source of truth
     double qdt = GLOBAL_QUERY_DT;
@@ -644,8 +676,7 @@ int computeDaysPerChunk(int num_systems, const ModelConfig& config) {
     const double samples_per_day = 1440.0 / qdt;
 
     // Dense output estimate (float)
-    const double bytes_per_day_dense =
-        double(num_systems) * double(N_EQ) * samples_per_day * sizeof(float);
+    const double bytes_per_day_dense = double(num_systems) * double(N_EQ) * samples_per_day * sizeof(float);
 
     // Keep a little slack (-1 day)
     const double safe = std::max(1.0, bytes_per_day_dense);
@@ -707,7 +738,6 @@ void simulateChunk(const ModelConfig& config,
     verifyDeviceForcingsHostSide(forcingChunk);   // round-trip check!!!
 
     // --- DEBUG: quick GPU probe of first few SpatialParams + forcings ---
-    // ---- QUICK GPU PROBE: dump params + first 2 forcing samples for a few systems ----
     // {
     //     // Get device pointers/symbols
     //     SpatialParams* d_sp = nullptr;
@@ -741,8 +771,8 @@ void simulateChunk(const ModelConfig& config,
     //         CUDA_CHECK(cudaDeviceSynchronize());
     //     }
     // }
-
-    // ------------------------------------------------------
+    // ──────────────────────────────────────────────────────────────── 
+    
     TimePoint t_input_end = Clock::now();
     logTimer("Input", elapsedSeconds(t_input_start, t_input_end));
 
@@ -776,7 +806,24 @@ void simulateChunk(const ModelConfig& config,
     // CUDA_CHECK(cudaDeviceSynchronize());
 
     // ───────── Prepare solver input arrays ─────────
+    // DEBUG: print cumulative runoff values at chunk start (for first system)
+    if (!streams.empty()) {
+        std::cout << "[DEBUG] chunk start surf_runoff="
+                << streams[0].y0[Runoff5::STATE_SURF_RUNOFF]
+                << " total="
+                << streams[0].y0[Runoff5::STATE_TOTAL_RUNOFF]
+                << std::endl;
+    }
     SolverInputs solverInputs = prepareSolverInputs(simYear, dayOffset, daysThisChunk, streams, include_tf);
+
+    
+    // ───── DEBUG: print the initial conditions sent to the GPU (system 0), ONCE ─────
+    if (!streams.empty() && rank == 0 && !g_ic_printed_once) {
+        std::cout << "[IC CHECK] y0 for s=0: ";
+        for (int i = 0; i < Runoff5::N_EQ; ++i) std::cout << solverInputs.h_y0[i] << " ";
+        std::cout << "\n";
+        g_ic_printed_once = true;
+    }
 
     // ───────── Launch ODE solver on GPU ─────────
     TimePoint t_solver_start = Clock::now();
@@ -793,7 +840,8 @@ void simulateChunk(const ModelConfig& config,
             << elapsedSeconds(t_output_start, t_output_end) << " seconds\n";
 }
 
-// ───────── Load forcing data from NetCDF and map to streams ─────────
+
+// ───────── Load NetCDF forcing data for this chunk ─────────
 NCForcing loadForcingData(const ModelConfig& config,
                           int simYear,
                           int dayOffset,
@@ -806,6 +854,12 @@ NCForcing loadForcingData(const ModelConfig& config,
     int Ye = Ys, Me = Ms, De = Ds;
     advanceDate(Ye, Me, De, daysThisChunk - 1);
 
+    // Build {forcing-name -> csv path} once
+    std::unordered_map<std::string, std::string> name2csv;
+    for (const auto& m : config.forcing_mappings) {
+        name2csv[m.name] = config.forcing_mappings_path + "/" + m.file;
+    }
+
     std::vector<ForcingEntry> forcings;
     forcings.reserve(config.forcing_variables.size());
 
@@ -815,87 +869,87 @@ NCForcing loadForcingData(const ModelConfig& config,
             (f.time_resolution == "24h") ? 24.0 :
             throw std::runtime_error("Unsupported resolution: " + f.time_resolution);
 
+        std::vector<std::string> files;
+
         if (!f.ranged_by_name) {
             // YEARLY mode → single file with {year} replacement
             std::string file = f.file;
             if (auto pos = file.find("{year}"); pos != std::string::npos) {
                 file.replace(pos, 6, std::to_string(simYear));
             }
-            forcings.push_back(ForcingEntry{
-                /*files=*/{ config.forcings_path + file },
-                /*var_name=*/f.var_name,
-                /*dt_hours=*/dt_hr,
-                /*dims_time=*/f.dims_time,
-                /*dims_lat=*/f.dims_lat,
-                /*dims_lon=*/f.dims_lon
-            });
-            continue;
-        }
-
-        // RANGED mode
-        std::vector<std::string> files;
-
-        // Option 1: explicit list (if your YAML provided it)
-        if (!f.files.empty()) {
-            files.reserve(f.files.size());
-            for (const auto& p : f.files) {
-                // allow absolute or relative under forcings_path
-                if (!p.empty() && (p[0] == '/' || (p.size() > 1 && p[1] == ':'))) {
-                    files.push_back(p);
-                } else {
-                    files.push_back(config.forcings_path + p);
-                }
-            }
-        }
-        // Option 2: file_pattern with {start}_{end} inside (pick overlapping files from a dir)
-        else if (!f.file_pattern.empty()) {
-            // Split the pattern into <prefix>{start}_{end}<suffix>
-            const std::string& pat = f.file_pattern;
-            auto startPos = pat.find("{start}");
-            auto endPos   = pat.find("{end}");
-            if (startPos == std::string::npos || endPos == std::string::npos || endPos < startPos) {
-                throw std::runtime_error("file_pattern must contain {start}_{end}: " + pat);
-            }
-
-            // Expect "...{start}_{end}..." (literally an underscore between them in real filenames)
-            std::string prefix = pat.substr(0, startPos);
-            // skip "{start}" and the following "_" (we’ll rely on date parser to find YYYYMMDD_YYYYMMDD)
-            std::string suffix = pat.substr(endPos + std::string("{end}").size());
-
-            // Choose a directory to scan. We’ll scan config.forcings_path / prefix’s directory.
-            fs::path dir = fs::path(config.forcings_path) / fs::path(prefix).parent_path();
-
-            // Reduce prefix/suffix to just the filename part used for matching
-            std::string fnPrefix = fs::path(prefix).filename().string();
-            std::string fnSuffix = fs::path(suffix).filename().string();
-
-            // Ask the helper to pick files in that directory whose name contains YYYYMMDD_YYYYMMDD and overlaps chunk
-            auto picked = select_ranged_files_overlapping(dir, fnPrefix, fnSuffix, Ys, Ms, Ds, Ye, Me, De);
-            if (picked.empty()) {
-                std::ostringstream oss;
-                oss << "No ranged files picked for variable '" << f.name
-                    << "' in " << dir.string()
-                    << " overlapping " << formatDate(Ys,Ms,Ds) << "-" << formatDate(Ye,Me,De);
-                throw std::runtime_error(oss.str());
-            }
-            files = std::move(picked);
+            files = { config.forcings_path + file };
         } else {
-            throw std::runtime_error(
-                "Ranged forcing '" + f.name + "' needs either 'files' or 'file_pattern'.");
+            // RANGED mode
+            if (!f.files.empty()) {
+                files.reserve(f.files.size());
+                for (const auto& p : f.files) {
+                    // allow absolute or relative under forcings_path
+                    if (!p.empty() && (p[0] == '/' || (p.size() > 1 && p[1] == ':'))) {
+                        files.push_back(p);
+                    } else {
+                        files.push_back(config.forcings_path + p);
+                    }
+                }
+            } else if (!f.file_pattern.empty()) {
+                // Split the pattern into <prefix>{start}_{end}<suffix>
+                const std::string& pat = f.file_pattern;
+                auto startPos = pat.find("{start}");
+                auto endPos   = pat.find("{end}");
+                if (startPos == std::string::npos || endPos == std::string::npos || endPos < startPos) {
+                    throw std::runtime_error("file_pattern must contain {start}_{end}: " + pat);
+                }
+
+                // Expect "...{start}_{end}..." (underscore in real filenames)
+                std::string prefix = pat.substr(0, startPos);
+                std::string suffix = pat.substr(endPos + std::string("{end}").size());
+
+                // Scan directory that contains the files
+                fs::path dir = fs::path(config.forcings_path) / fs::path(prefix).parent_path();
+                std::string fnPrefix = fs::path(prefix).filename().string();
+                std::string fnSuffix = fs::path(suffix).filename().string();
+
+                // Pick overlapping files
+                auto picked = select_ranged_files_overlapping(dir, fnPrefix, fnSuffix,
+                                                              Ys, Ms, Ds, Ye, Me, De);
+                if (picked.empty()) {
+                    std::ostringstream oss;
+                    oss << "No ranged files picked for variable '" << f.name
+                        << "' in " << dir.string()
+                        << " overlapping " << formatDate(Ys,Ms,Ds) << "-" << formatDate(Ye,Me,De);
+                    throw std::runtime_error(oss.str());
+                }
+                files = std::move(picked);
+            } else {
+                throw std::runtime_error(
+                    "Ranged forcing '" + f.name + "' needs either 'files' or 'file_pattern'.");
+            }
         }
 
         std::cout << "[FORCING PICK] " << f.var_name << " files for "
                   << formatDate(Ys,Ms,Ds) << "-" << formatDate(Ye,Me,De) << ":\n";
         for (auto& p : files) std::cout << "   - " << p << "\n";
 
-        forcings.push_back(ForcingEntry{
+        // Build entry and attach per-variable mapper CSV (by YAML `name`, e.g. "pr","t2m")
+        ForcingEntry entry{
             /*files=*/std::move(files),
             /*var_name=*/f.var_name,
             /*dt_hours=*/dt_hr,
             /*dims_time=*/f.dims_time,
             /*dims_lat=*/f.dims_lat,
-            /*dims_lon=*/f.dims_lon
-        });
+            /*dims_lon=*/f.dims_lon,
+            /*lookup_csv=*/{} // set below
+        };
+
+        auto it = name2csv.find(f.name);
+        if (it != name2csv.end()) {
+            entry.lookup_csv = it->second;
+            std::cout << "[MAPPING] " << f.name << " -> " << entry.lookup_csv << "\n";
+        } else {
+            throw std::runtime_error(
+                "No forcing_mappings CSV for variable '" + f.name + "'");
+        }
+
+        forcings.push_back(std::move(entry));
     }
 
     NCForcing chunk;
@@ -907,13 +961,6 @@ NCForcing loadForcingData(const ModelConfig& config,
     // store absolute date range (used by NCForcing::loadData)
     chunk.Ys = Ys; chunk.Ms = Ms; chunk.Ds = Ds;
     chunk.Ye = Ye; chunk.Me = Me; chunk.De = De;
-
-    // mapper
-    std::string mapperFile = config.forcing_mappings_path + "/" + config.forcing_mappings[0].file;
-    chunk.mapper = LookupMapper(mapperFile);
-    if (!chunk.mapper.load()) {
-        throw std::runtime_error("Failed to load stream → lat/lon mapping");
-    }
 
     // system IDs
     chunk.systemIds.resize(num_systems);
@@ -933,33 +980,10 @@ void uploadForcingsToGpu(NCForcing& chunk) {
         throw std::runtime_error("No forcing data loaded for this chunk");
     }
 
-    // --- DEBUG: Scan host data for NaN/Inf values --- !!! probably should keep but check later
-    // {
-    //     auto scan = [](const float* a, size_t n, const char* name){
-    //         size_t bad=0, first=(size_t)-1;
-    //         float mn=INFINITY, mx=-INFINITY;
-    //         for(size_t i=0;i<n;i++){
-    //             float v=a[i];
-    //             if(!std::isfinite(v)){ bad++; if(first==(size_t)-1) first=i; }
-    //             else { if(v<mn) mn=v; if(v>mx) mx=v; }
-    //         }
-    //         if(bad){
-    //             std::fprintf(stderr,
-    //             "[NaNCHK] %s: %zu bad values; first idx=%zu\n", name, bad, first);
-    //             // Bail early so you know it’s inputs, not the kernel:
-    //             throw std::runtime_error("NaN/Inf detected in forcings");
-    //         } else {
-    //             std::fprintf(stderr,"[NaNCHK] %s: min=%g max=%g\n", name, (double)mn, (double)mx);
-    //         }
-    //     };
-    //     // pr is f=0, t2m is f=1; scan each forcing slab
-    //     size_t base = 0;
-    //     for(int f=0; f<chunk.nForc; ++f){
-    //         size_t count = (size_t)chunk.nT[f] * (size_t)chunk.systems;
-    //         scan(chunk.h_data.data()+base, count, f==0?"pr":"t2m");
-    //         base += count;
-    //     }
-    // }
+    // Convert cadence from HOURS → MINUTES (kernel expects minutes)
+    for (int f = 0; f < chunk.nForc; ++f) {
+        chunk.dt[f] *= 60.0;
+    }
 
 
     // --- Make absolutely sure no kernels are still using the old buffer ---
@@ -1002,12 +1026,17 @@ SolverInputs prepareSolverInputs(int simYear,
     SolverInputs input;
     int N_EQ = Runoff5::N_EQ;
     int num_systems = streams.size();
+    // Reset chunk-local cumulative diagnostics so each chunk starts fresh.
+    // These states are cumulative "mm since chunk t0" by design.
+    // (We MUST NOT carry them across chunks, or the first bucket will be huge.)
+    // NOTE: streams is const&; we only touch the copies we flatten into h_y0 below.
+
 
     // Absolute simulation times
     input.t0 = dayOffset * 24.0 * 60.0;
     input.tf = input.t0 + daysThisChunk * 24.0 * 60.0;
 
-    // Flatten initial conditions
+    // Flatten initial conditions (carry cumulative runoff across chunks)
     input.h_y0.resize(num_systems * N_EQ);
     for (int s = 0; s < num_systems; ++s) {
         for (int i = 0; i < N_EQ; ++i) {
@@ -1015,16 +1044,37 @@ SolverInputs prepareSolverInputs(int simYear,
         }
     }
 
+    // ──  Query times: strict uniform grid; keep tf only if on-grid ── 
+    input.h_query_times.clear();
 
-    // Define query times using GLOBAL_QUERY_DT
-    // push times up to (but not including) tf
-    for (double m = input.t0; m < input.tf - 1e-9; m += GLOBAL_QUERY_DT)
-        input.h_query_times.push_back(m);
-    
-    // If include_tf is true, add the final time point
-    if (include_tf) {
-        input.h_query_times.push_back(input.tf);
+    const double qdt = GLOBAL_QUERY_DT;     // minutes
+    const double span = input.tf - input.t0;
+    const int nsteps = (int)std::floor(span / qdt);
+
+    // Push t0+Δ, t0+2Δ, ..., up to but not beyond tf
+    for (int i = 1; i <= nsteps; ++i) {
+        input.h_query_times.push_back(input.t0 + i * qdt);
     }
+
+    // If caller insists on including tf, only do it when it's on the grid
+    if (include_tf) {
+        const double r = std::fmod((input.tf - input.t0), qdt);
+        const bool tf_on_grid = (std::fabs(r) < 1e-9) || (std::fabs(r - qdt) < 1e-9);
+        if (tf_on_grid) {
+            // tf is already the last pushed point if nsteps*qdt == span
+            if (input.h_query_times.empty() ||
+                std::fabs(input.h_query_times.back() - input.tf) > 1e-9) {
+                input.h_query_times.push_back(input.tf);
+            }
+        }
+    }
+
+
+
+
+
+    logQueryGrid(input, "prepareSolverInputs");
+    
 
 
     return input;
@@ -1100,6 +1150,162 @@ SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc) {
     return out;
 }
 
+// Aggregated hourly runoff for every hour in the chunk (nt = nq).
+// Writes mm/hr for each hourly bin ending at query_times[t], t=0..nq-1.
+// Seam-safe and representation-agnostic (handles GLOBAL vs LOCAL cumulatives).
+// void compute_hourly_runoff_rates(
+//     const std::vector<float>& dense,          // cumulative meters at query times
+//     const std::vector<double>& y0,            // state at chunk start (GLOBAL cumulative meters)
+//     int ns, int nq, int N_EQ,
+//     int idx_surf, int idx_total,
+//     double query_dt_min,                      // must be fixed (e.g., 60)
+//     std::vector<float>& hourly_surf_mmhr,
+//     std::vector<float>& hourly_total_mmhr
+// ) {
+//     // Shape & basic guards
+//     hourly_surf_mmhr.assign(size_t(ns) * size_t(nq), 0.0f);
+//     hourly_total_mmhr.assign(size_t(ns) * size_t(nq), 0.0f);
+//     if (ns <= 0 || nq <= 0 || N_EQ <= 0) return;
+//     if ((int)dense.size() < ns * nq * N_EQ) return;
+//     if ((int)y0.size()    < ns * N_EQ)      return;
+
+//     const double dt_hr = query_dt_min / 60.0;
+//     if (!(dt_hr > 0.0)) return;
+
+//     auto IDX = [&](int s, int t, int k) -> size_t {
+//         // Layout: ((s * nq + t) * N_EQ + k)
+//         return (size_t(s) * size_t(nq) + size_t(t)) * size_t(N_EQ) + size_t(k);
+//     };
+
+//     constexpr double EPS_MM = 1e-6;  // clamp tiny negatives / noise (mm)
+
+//     for (int s = 0; s < ns; ++s) {
+//         // GLOBAL baselines at chunk start (meters)
+//         const double base_surf_m  = y0[size_t(s) * size_t(N_EQ) + size_t(idx_surf)];
+//         const double base_total_m = y0[size_t(s) * size_t(N_EQ) + size_t(idx_total)];
+
+//         // Detect whether dense is LOCAL (since t0) or GLOBAL (since long ago)
+//         const double first_surf_m  = (double)dense[IDX(s, 0, idx_surf)];
+//         const double first_total_m = (double)dense[IDX(s, 0, idx_total)];
+//         const bool dense_is_local_surf  = first_surf_m  + 1e-12 < base_surf_m;
+//         const bool dense_is_local_total = first_total_m + 1e-12 < base_total_m;
+
+//         // --- first hour: (t0 → t1 = query_times[0]) ---
+//         {
+//             double c_surf_m  = (double)dense[IDX(s, 0, idx_surf)];
+//             double c_total_m = (double)dense[IDX(s, 0, idx_total)];
+//             if (!std::isfinite(c_surf_m )) c_surf_m  = base_surf_m;
+//             if (!std::isfinite(c_total_m)) c_total_m = base_total_m;
+
+//             // If dense is LOCAL, the baseline at t0 is 0; if GLOBAL, it's y0.
+//             const double baseline_surf_m  = dense_is_local_surf  ? 0.0        : base_surf_m;
+//             const double baseline_total_m = dense_is_local_total ? 0.0        : base_total_m;
+
+//             double dmm_surf  = (c_surf_m  - baseline_surf_m ) * 1000.0;
+//             double dmm_total = (c_total_m - baseline_total_m) * 1000.0;
+
+//             if (dmm_surf  < EPS_MM) dmm_surf  = 0.0;
+//             if (dmm_total < EPS_MM) dmm_total = 0.0;
+
+//             hourly_surf_mmhr [size_t(s) * size_t(nq) + 0] = (float)(dmm_surf  / dt_hr);
+//             hourly_total_mmhr[size_t(s) * size_t(nq) + 0] = (float)(dmm_total / dt_hr);
+//         }
+
+//         // --- remaining hours: (t1→t2), (t2→t3), … ---
+//         for (int t = 1; t < nq; ++t) {
+//             double p_surf_m  = (double)dense[IDX(s, t - 1, idx_surf)];
+//             double c_surf_m  = (double)dense[IDX(s, t,     idx_surf)];
+//             double p_total_m = (double)dense[IDX(s, t - 1, idx_total)];
+//             double c_total_m = (double)dense[IDX(s, t,     idx_total)];
+
+//             // NaN/Inf guard: hold last good value
+//             if (!std::isfinite(p_surf_m )) p_surf_m  = c_surf_m;
+//             if (!std::isfinite(p_total_m)) p_total_m = c_total_m;
+//             if (!std::isfinite(c_surf_m )) c_surf_m  = p_surf_m;
+//             if (!std::isfinite(c_total_m)) c_total_m = p_total_m;
+
+//             // Differences are representation-agnostic (GLOBAL or LOCAL)
+//             double dmm_surf  = (c_surf_m  - p_surf_m ) * 1000.0;
+//             double dmm_total = (c_total_m - p_total_m) * 1000.0;
+
+//             if (dmm_surf  < EPS_MM) dmm_surf  = 0.0;
+//             if (dmm_total < EPS_MM) dmm_total = 0.0;
+
+//             const size_t out = size_t(s) * size_t(nq) + size_t(t);
+//             hourly_surf_mmhr [out] = (float)(dmm_surf  / dt_hr);
+//             hourly_total_mmhr[out] = (float)(dmm_total / dt_hr);
+//         }
+//     }
+// }
+
+// Drop-in: always returns rates in mm/hr
+void compute_runoff_rate_mm_per_hr(
+    const std::vector<float>& dense,     // cumulative meters at query times
+    const std::vector<double>& y0,       // state at chunk start (GLOBAL cumulative meters)
+    int ns, int nq, int N_EQ,
+    int idx_surf, int idx_total,
+    double query_dt_min,                 // ← GLOBAL_QUERY_DT
+    std::vector<float>& rate_surf_mmhr,
+    std::vector<float>& rate_total_mmhr
+) {
+    rate_surf_mmhr.assign(size_t(ns)*size_t(nq), 0.0f);
+    rate_total_mmhr.assign(size_t(ns)*size_t(nq), 0.0f);
+    if (ns<=0 || nq<=0 || N_EQ<=0) return;
+    if ((int)dense.size() < ns*nq*N_EQ) return;
+    if ((int)y0.size()    < ns*N_EQ)    return;
+
+    const double dt_hr = query_dt_min / 60.0;
+    if (!(dt_hr > 0.0)) return;
+
+    auto IDX = [&](int s,int t,int k)->size_t {
+        return (size_t(s)*size_t(nq)+size_t(t))*size_t(N_EQ)+size_t(k);
+    };
+
+    constexpr double EPS_MM = 1e-6;
+
+    for (int s = 0; s < ns; ++s) {
+        const double base_surf_m  = y0[size_t(s)*size_t(N_EQ)+size_t(idx_surf)];
+        const double base_total_m = y0[size_t(s)*size_t(N_EQ)+size_t(idx_total)];
+
+        // First bin: compare to baseline (GLOBAL or LOCAL)
+        {
+            const double c_surf_m  = (double)dense[IDX(s,0,idx_surf)];
+            const double c_total_m = (double)dense[IDX(s,0,idx_total)];
+
+            // If kernel’s dense is LOCAL since t0, baseline is 0.0; otherwise baseline=y0
+            const bool dense_is_local_surf  = c_surf_m  + 1e-12 < base_surf_m;
+            const bool dense_is_local_total = c_total_m + 1e-12 < base_total_m;
+
+            const double d_surf_mm  = (c_surf_m  - (dense_is_local_surf  ? 0.0 : base_surf_m)) * 1000.0;
+            const double d_total_mm = (c_total_m - (dense_is_local_total ? 0.0 : base_total_m)) * 1000.0;
+
+            rate_surf_mmhr [size_t(s)*size_t(nq)+0] = (float)((d_surf_mm  < EPS_MM ? 0.0 : d_surf_mm ) / dt_hr);
+            rate_total_mmhr[size_t(s)*size_t(nq)+0] = (float)((d_total_mm < EPS_MM ? 0.0 : d_total_mm) / dt_hr);
+        }
+
+        // Subsequent bins: difference consecutive cumulatives
+        for (int t = 1; t < nq; ++t) {
+            const double p_surf_m  = (double)dense[IDX(s,t-1,idx_surf)];
+            const double c_surf_m  = (double)dense[IDX(s,t,  idx_surf)];
+            const double p_total_m = (double)dense[IDX(s,t-1,idx_total)];
+            const double c_total_m = (double)dense[IDX(s,t,  idx_total)];
+
+            double d_surf_mm  = (c_surf_m  - p_surf_m ) * 1000.0;
+            double d_total_mm = (c_total_m - p_total_m) * 1000.0;
+            if (d_surf_mm  < EPS_MM) d_surf_mm  = 0.0;
+            if (d_total_mm < EPS_MM) d_total_mm = 0.0;
+
+            rate_surf_mmhr [size_t(s)*size_t(nq)+t] = (float)(d_surf_mm  / dt_hr);
+            rate_total_mmhr[size_t(s)*size_t(nq)+t] = (float)(d_total_mm / dt_hr);
+        }
+    }
+}
+
+
+
+
+
+
 // ───────── Handle outputs from the solver: retrieve results, write NetCDF files
 void handleSolverOutputs(const ModelConfig& config, 
                          int simYear,
@@ -1123,16 +1329,79 @@ void handleSolverOutputs(const ModelConfig& config,
         devSpatialParamsPtr
     );
 
-    // ───── DEBUG: Print first 5 time steps for system s=0 ─────
-    // std::cout << "[DEBUG STATE] First 5 time steps for s=0:\n";
-    // for (int t = 0; t < std::min(5, nq); ++t) {
-    //     std::cout << "  t=" << t << " → ";
-    //     for (int i = 0; i < N_EQ; ++i) {
-    //         double val = h_dense[(0 * nq + t) * N_EQ + i]; // correct index
-    //         std::cout << val << (i < N_EQ - 1 ? ", " : "");
-    //     }
-    //     std::cout << "\n";
+    // ── Seam check: look at the very last interval in this chunk ──
+    if (rank==0 && ns>0 && nq>=2) {
+        auto IDX = [&](int s,int t,int k)->size_t{
+            return (size_t(s)*size_t(nq)+size_t(t))*size_t(N_EQ)+size_t(k);
+        };
+        const int s  = 0;                // inspect first system
+        const int t0 = nq - 2;           // penultimate sample
+        const int t1 = nq - 1;           // last sample
+        const double dt_last_hr = (input.h_query_times[t1] - input.h_query_times[t0]) / 60.0;
+        const double c0 = (double)h_dense[IDX(s,t0,Runoff5::STATE_SURF_RUNOFF)];   // meters (cumulative)
+        const double c1 = (double)h_dense[IDX(s,t1,Runoff5::STATE_SURF_RUNOFF)];   // meters (cumulative)
+
+        std::cout << std::setprecision(12)
+                << "[SEAM] s=0 last interval: "
+                << "t0=" << input.h_query_times[t0]
+                << "  t1=" << input.h_query_times[t1]
+                << "  dt_hr=" << dt_last_hr
+                << "  c0=" << c0 << "  c1=" << c1
+                << "  rate(mm/hr)=" << (dt_last_hr>0 ? ((c1-c0)*1000.0/dt_last_hr) : -1.0)
+                << "\n";
+    }
+
+
+    // ── Hourly aggregated runoff (mm/hr) ── 
+    // std::vector<float> hourly_surf_mmhr, hourly_total_mmhr;
+
+    // compute_hourly_runoff_rates_mm_per_hr(
+    //     h_dense, input.h_y0,  // need y0 at chunk start for global→local
+    //     ns, nq, N_EQ,
+    //     Runoff5::STATE_SURF_RUNOFF,
+    //     Runoff5::STATE_TOTAL_RUNOFF,
+    //     GLOBAL_QUERY_DT,
+    //     hourly_surf_mmhr,
+    //     hourly_total_mmhr
+    // );
+
+    // // Quick sanity peek
+    // if (rank==0 && ns>0 && nq>0) {
+    //     std::cout << std::setprecision(12)
+    //             << "[RUNOFF] first=" << runoff_surf_mmhr[0] << " mm/hr, "
+    //             << "last="  << runoff_surf_mmhr[nq-1] << " mm/hr\n";
     // }
+
+    std::vector<float> hourly_surf_mmhr, hourly_total_mmhr;
+
+    compute_runoff_rate_mm_per_hr(
+        h_dense, input.h_y0,    // need y0 at chunk start for global→local vs global
+        ns, nq, N_EQ,
+        Runoff5::STATE_SURF_RUNOFF,
+        Runoff5::STATE_TOTAL_RUNOFF,
+        GLOBAL_QUERY_DT,        // minutes → function converts to hours
+        hourly_surf_mmhr,
+        hourly_total_mmhr
+    );
+
+    // Quick sanity peek (always mm/hr)
+    if (rank == 0 && ns > 0 && nq > 0) {
+        std::cout << std::setprecision(12)
+                << "[RUNOFF] first=" << hourly_surf_mmhr[0] << " mm/hr, "
+                << "last="          << hourly_surf_mmhr[nq-1] << " mm/hr\n";
+    }
+
+
+    
+    // Helper for indexing dense array: ((s * nq + t) * N_EQ + k)
+    auto IDX = [&](int s,int t,int k)->size_t {
+        return (size_t(s)*size_t(nq)+size_t(t))*size_t(N_EQ)+size_t(k);
+    };
+
+    // 🔹 Define state indices before using them
+    constexpr int IDX_SURF  = Runoff5::STATE_SURF_RUNOFF;
+    constexpr int IDX_TOTAL = Runoff5::STATE_TOTAL_RUNOFF;
+
 
     // Update stream objects with final y0 state 
     for (int s = 0; s < ns; ++s) {
@@ -1140,6 +1409,7 @@ void handleSolverOutputs(const ModelConfig& config,
             streams[s].y0[i] = h_y_final[s * N_EQ + i];
         }
     }
+
 
     // Format start and end date strings for filenames
     int Y = simYear, M = 1, D = 1;
@@ -1162,6 +1432,10 @@ void handleSolverOutputs(const ModelConfig& config,
     std::string dense_file    = config.output_path + "/dense_"   + sDate + "_" + eDate + rank_tag + ".nc";
     std::string runoff_file   = config.output_path + "/runoff_"  + sDate + "_" + eDate + rank_tag + ".nc";
 
+
+    // Time for hourly intervals (skip first dense)
+    const double* hourly_times = input.h_query_times.data();
+    int nt_hourly = nq;
 
     // Prepare metadata arrays
     std::vector<uint32_t> link_ids(ns);
@@ -1200,12 +1474,23 @@ void handleSolverOutputs(const ModelConfig& config,
     // Write selected runoff states
     if (!config.runoff_output_file.empty()) {
         logWrite(std::filesystem::path(runoff_file).filename().string());
-        write_runoff_dense_netcdf(runoff_file,
-                                h_dense.data(),
-                                input.h_query_times.data(),
-                                link_ids.data(),
-                                nq, ns,
-                                time_origin);
+        // write_runoff_dense_netcdf(runoff_file, // writes the cumulative runoff states at all query times
+        //                         h_dense.data(),
+        //                         input.h_query_times.data(),
+        //                         link_ids.data(),
+        //                         nq, ns,
+        //                         time_origin);
+
+        write_runoff_rates_netcdf(
+            runoff_file,
+            /*surf_mmhr*/  hourly_surf_mmhr.data(),
+            /*total_mmhr*/ hourly_total_mmhr.data(),
+            /*time_vals*/  hourly_times,
+            /*link_ids*/   link_ids.data(),
+            /*num_systems*/ns,
+            /*num_queries*/nt_hourly,
+            /*origin*/     time_origin
+        );
     } else {
         std::cout << "[SKIP] runoff output disabled via config\n";
     }
@@ -1422,19 +1707,6 @@ if (!usingMPI) {
               << " systems (rows " << s << " .. " << (e ? e-1 : 0) << ")\n";
 }
 
-// {// ─ Set up GPU solver parameters from config ──
-    //     Runoff5::Parameters hostP;
-    //     hostP.rtol        = config.rtol;
-    //     hostP.atol        = config.atol;
-    //     hostP.safety      = config.safety;
-    //     hostP.minScale    = config.min_scale;
-    //     hostP.maxScale    = config.max_scale;
-    //     hostP.initialStep = config.initial_step;
-
-    //     // push into GPU constant memory
-    //     CUDA_CHECK(cudaMemcpyToSymbol(devParams, &hostP, sizeof(hostP)));
-    // }
-
     {// ─ Set up GPU solver parameters from config ──
         Runoff5::Parameters hostP;
         // Start with model defaults (match struct defaults)
@@ -1472,27 +1744,11 @@ if (!usingMPI) {
             << " initialStep=" << hostP.initialStep
             << (config.override_tolerances ? " [tols:override]" : " [tols:default]")
             << (config.override_initial_step ? " [h0:override]" : " [h0:default]");
-        logGpu(std::string("Solver params → ") + oss.str());
+        logGpu(std::string("Solver params: ") + oss.str());
 
         // Push to device
         CUDA_CHECK(cudaMemcpyToSymbol(devParams, &hostP, sizeof(hostP)));
     }
-
-// === DEBUG: print first stream parameters to check overrides === !!!
-// if (!spatialParams.empty()) {
-//     const auto &sp = spatialParams.front();
-//     std::cout << "=== DEBUG: FIRST STREAM PARAMETERS ===\n";
-//     std::cout << "stream ID     : " << sp.stream << "\n";
-//     std::cout << "c1 (m/min per mm/hr): " << sp.c1 << "\n";
-//     std::cout << "Hu (m)        : " << sp.Hu << "\n";
-//     std::cout << "infil (m/min) : " << sp.infil << "\n";
-//     std::cout << "perco (m/min) : " << sp.perco << "\n";
-//     std::cout << "A_h (m^2)     : " << sp.A_h << "\n";
-//     std::cout << "Slope (m/m)   : " << sp.slope << "\n";
-//     std::cout << "n_mann        : " << sp.n_mann << "\n";
-//     std::cout << "=====================================\n";
-// }
-
 
 // Build, upload, run simulation
 auto streams = buildStreams(spatialParams, config);
@@ -1505,17 +1761,9 @@ if (config.initial_mode == "from_file") {
 }
 
 // Checking spatial params of first stream !!!
-if (!streams.empty()) {
-    printSpatialParams(streams.front().sp);
-}
-
-// for (size_t i = 0; i < std::min<size_t>(5, streams.size()); ++i) { //!!!
-//     std::cout << "--- Stream index " << i 
-//               << " (ID=" << streams[i].sp.stream << ") ---\n";
-//     printSpatialParams(streams[i].sp);
+// if (!streams.empty()) {
+//     printSpatialParams(streams.front().sp);
 // }
-
-
 
 // Now upload and run
 setupGpu(spatialParams, streams);

@@ -54,8 +54,7 @@ std::vector<SpatialParams> loadSpatialParams(const std::string& csv_path) {
         }
     }
 
-    // Conversion constant: mm/hr → m/min
-    constexpr double c_1 = 0.001 / 60.0;
+   
     // We no longer read c1 from CSV; use c_1 as a fixed conversion factor.
 
     std::vector<SpatialParams> out;
@@ -84,7 +83,7 @@ std::vector<SpatialParams> loadSpatialParams(const std::string& csv_path) {
             p.next_stream = -1;
         }
 
-        // store conversion factor for downstream code
+        // fixed conversion factor for mm/hr → m/min
         p.c1 = 0.001/60.0;
 
         // direct mappings
@@ -98,7 +97,7 @@ std::vector<SpatialParams> loadSpatialParams(const std::string& csv_path) {
         p.slope    = std::stod(fields[idx["slope"]]); // average slope of hillslope [m/m]
         p.L        = std::stod(fields[idx["length_km"]]);   // length of channel [km] 
         p.A_h      = std::stod(fields[idx["area_sqkm"]]); // area of hillslopes in [km²]
-        // p.A_i = std::stod(fields[idx["drainage_area_km2"]]); // drainage area in [km²], don't need this parameter for runoff !!! remove it
+        // p.A_i = std::stod(fields[idx["drainage_area_km2"]]); // drainage area in [km²], don't need this parameter for runoff 
         p.melt_f   = std::stod(fields[idx["melt"]]); // melt factor [mm/day/°C]
         p.temp_thr = std::stod(fields[idx["t_thres"]]); // temperature threshold for snowmelt [°C]
 

@@ -172,6 +172,12 @@ void write_runoff_dense_netcdf(const std::string& filename,
     NC_CHECK(nc_def_var(ncid, "surface_runoff", NC_FLOAT, 2, dims2, &surf_varid));
     NC_CHECK(nc_def_var(ncid, "total_runoff",   NC_FLOAT, 2, dims2, &total_varid));
 
+     // Add descriptive attributes (units = meters, cumulative)
+    NC_CHECK(nc_put_att_text(ncid, surf_varid,  "long_name", 24, "Surface runoff (cumulative)"));
+    NC_CHECK(nc_put_att_text(ncid, surf_varid,  "units",      1, "m"));
+    NC_CHECK(nc_put_att_text(ncid, total_varid, "long_name", 22, "Total runoff (cumulative)"));
+    NC_CHECK(nc_put_att_text(ncid, total_varid, "units",      1, "m"));
+
     // End define mode
     NC_CHECK(nc_enddef(ncid));
 
@@ -375,6 +381,71 @@ void load_initial_from_final_nc_serial(const std::string& path,
         std::exit(1);
     }
 
+    NC_CHECK(nc_close(ncid));
+}
+
+/**
+ * @brief Write per-chunk mean runoff rates (mm/hr) as a 2D (system, time) file.
+ *        Expects one time sample per chunk (time dimension = 1).
+ */
+void write_runoff_rates_netcdf(const std::string& filename,
+                               const float*       surf_mmhr,   // size: num_systems * num_queries (usually 1)
+                               const float*       total_mmhr,  // size: num_systems * num_queries (usually 1)
+                               const double*      time_vals,   // minutes since time_origin
+                               const uint32_t*    linkid_vals,
+                               int                num_systems,
+                               int                num_queries, // usually 1 for chunk mean
+                               const std::string& time_origin)
+{
+    int ncid, sys_dimid, time_dimid;
+    int sys_varid, time_varid, surf_varid, total_varid;
+
+    // Create file
+    NC_CHECK(nc_create(filename.c_str(), NC_NETCDF4 | NC_CLOBBER, &ncid));
+
+    // Define dimensions
+    NC_CHECK(nc_def_dim(ncid, "system", num_systems, &sys_dimid));
+    NC_CHECK(nc_def_dim(ncid, "time",   num_queries, &time_dimid));
+
+    // Define coordinate variables
+    NC_CHECK(nc_def_var(ncid, "system", NC_UINT,   1, &sys_dimid,  &sys_varid));
+    NC_CHECK(nc_def_var(ncid, "time",   NC_DOUBLE, 1, &time_dimid, &time_varid));
+    NC_CHECK(nc_put_att_text(ncid, sys_varid,  "long_name", 6, "LinkID"));
+    NC_CHECK(nc_put_att_text(ncid, time_varid, "long_name", 4, "Time"));
+
+    const std::string tu = "minutes since " + time_origin;
+    NC_CHECK(nc_put_att_text(ncid, time_varid, "units",    tu.size(), tu.c_str()));
+    NC_CHECK(nc_put_att_text(ncid, time_varid, "calendar", 9, "gregorian"));
+
+    // Define data variables: surface and total mean rates (mm/hr)
+    int dims2[2] = { sys_dimid, time_dimid };
+    NC_CHECK(nc_def_var(ncid, "surface_runoff_mmhr", NC_FLOAT, 2, dims2, &surf_varid));
+    NC_CHECK(nc_def_var(ncid, "total_runoff_mmhr",   NC_FLOAT, 2, dims2, &total_varid));
+
+    // force contiguous layout (no chunking)
+    NC_CHECK(nc_def_var_chunking(ncid, surf_varid,  NC_CONTIGUOUS, nullptr));
+    NC_CHECK(nc_def_var_chunking(ncid, total_varid, NC_CONTIGUOUS, nullptr));
+
+    // Variable metadata
+    // NC_CHECK(nc_put_att_text(ncid, surf_varid,  "long_name", 27, "Surface runoff mean rate"));
+    // NC_CHECK(nc_put_att_text(ncid, total_varid, "long_name", 25, "Total runoff mean rate"));
+    NC_CHECK(nc_put_att_text(ncid, surf_varid,  "long_name", 22, "Surface runoff rate"));
+    NC_CHECK(nc_put_att_text(ncid, total_varid, "long_name", 20, "Total runoff rate"));
+    NC_CHECK(nc_put_att_text(ncid, surf_varid,  "units",      7, "mm hr-1"));
+    NC_CHECK(nc_put_att_text(ncid, total_varid, "units",      7, "mm hr-1"));
+
+    // End define mode
+    NC_CHECK(nc_enddef(ncid));
+
+    // Write coordinates
+    NC_CHECK(nc_put_var_uint(  ncid, sys_varid,  linkid_vals));
+    NC_CHECK(nc_put_var_double(ncid, time_varid, time_vals));
+
+    // Write data
+    NC_CHECK(nc_put_var_float(ncid, surf_varid,  surf_mmhr));
+    NC_CHECK(nc_put_var_float(ncid, total_varid, total_mmhr));
+
+    // Close
     NC_CHECK(nc_close(ncid));
 }
 

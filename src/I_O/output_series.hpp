@@ -114,3 +114,20 @@ void load_initial_from_final_nc_serial(
     const std::string& path,
     std::vector<Stream<Runoff5>>& streams
 );
+
+/**
+ * @brief Write per-chunk mean runoff rates (mm/hr) as a 2D (system, time) file.
+ *        Expects one time sample per chunk (time dimension = 1).
+ *
+ * Variables:
+ *   - surface_runoff_mmhr[system, time]
+ *   - total_runoff_mmhr  [system, time]
+ */
+void write_runoff_rates_netcdf(const std::string& filename,
+                               const float*       surf_mmhr,   // size: num_systems * num_queries (usually 1)
+                               const float*       total_mmhr,  // size: num_systems * num_queries (usually 1)
+                               const double*      time_vals,   // minutes since time_origin
+                               const uint32_t*    linkid_vals,
+                               int                num_systems,
+                               int                num_queries, // usually 1 for chunk mean
+                               const std::string& time_origin);
