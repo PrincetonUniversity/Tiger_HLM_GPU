@@ -1034,7 +1034,6 @@ void uploadForcingsToGpu(NCForcing& chunk) {
 }
 
 
-// ───────── Setup solver time bounds, initial conditions, and query times
 SolverInputs prepareSolverInputs(int simYear,
                                   int dayOffset,
                                   int daysThisChunk,
@@ -1043,74 +1042,47 @@ SolverInputs prepareSolverInputs(int simYear,
     SolverInputs input;
     int N_EQ = Runoff5::N_EQ;
     int num_systems = streams.size();
-    // Reset chunk-local cumulative diagnostics so each chunk starts fresh.
-    // These states are cumulative "mm since chunk t0" by design.
-    // (We MUST NOT carry them across chunks, or the first bucket will be huge.)
-    // NOTE: streams is const&; we only touch the copies we flatten into h_y0 below.
-
 
     // Absolute simulation times
     input.t0 = dayOffset * 24.0 * 60.0;
     input.tf = input.t0 + daysThisChunk * 24.0 * 60.0;
 
-    // // Flatten initial conditions (carry cumulative runoff across chunks)
-    // input.h_y0.resize(num_systems * N_EQ);
-    // for (int s = 0; s < num_systems; ++s) {
-    //     for (int i = 0; i < N_EQ; ++i) {
-    //         input.h_y0[s * N_EQ + i] = streams[s].y0[i];
-    //     }
-    // }
-
-    // Flatten initial conditions (but zero the two cumulative runoff states for this chunk)
+    // Flatten initial conditions (zero cumulative runoff states)
     input.h_y0.resize((size_t)num_systems * N_EQ);
     for (int s = 0; s < num_systems; ++s) {
         const auto& y = streams[s].y0;
         double* dst = &input.h_y0[(size_t)s * N_EQ];
-
-        // copy all states
         for (int i = 0; i < N_EQ; ++i) dst[i] = y[i];
-
-        // zero *only* the cumulatives we want to be per-chunk
+        
+        // Zero cumulative states for this chunk
         dst[Runoff5::STATE_SURF_RUNOFF]  = 0.0;
         dst[Runoff5::STATE_TOTAL_RUNOFF] = 0.0;
-        // Keep them continuous across chunks:
-        // for (int i = 0; i < N_EQ; ++i) dst[i] = y[i];
     }
 
-
-    // ──  Query times: strict uniform grid; keep tf only if on-grid ── 
+    // ── Build query times: t0, t0+Δ, t0+2Δ, ..., tf (if on-grid) ──
     input.h_query_times.clear();
-
-    const double qdt = GLOBAL_QUERY_DT;     // minutes
+    input.h_query_times.push_back(input.t0);  // ← CRITICAL: anchor point
+    
+    const double qdt = GLOBAL_QUERY_DT;
     const double span = input.tf - input.t0;
     const int nsteps = (int)std::floor(span / qdt);
-
-    // Push t0+Δ, t0+2Δ, ..., up to but not beyond tf
+    
     for (int i = 1; i <= nsteps; ++i) {
         input.h_query_times.push_back(input.t0 + i * qdt);
     }
-
-    // If caller insists on including tf, only do it when it's on the grid
+    
+    // Include tf only if it's on the grid
     if (include_tf) {
-        const double r = std::fmod((input.tf - input.t0), qdt);
+        const double r = std::fmod(span, qdt);
         const bool tf_on_grid = (std::fabs(r) < 1e-9) || (std::fabs(r - qdt) < 1e-9);
-        if (tf_on_grid) {
-            // tf is already the last pushed point if nsteps*qdt == span
-            if (input.h_query_times.empty() ||
-                std::fabs(input.h_query_times.back() - input.tf) > 1e-9) {
-                input.h_query_times.push_back(input.tf);
-            }
+        if (tf_on_grid &&
+            (input.h_query_times.empty() || 
+             std::fabs(input.h_query_times.back() - input.tf) > 1e-9)) {
+            input.h_query_times.push_back(input.tf);
         }
     }
 
-
-
-
-
     logQueryGrid(input, "prepareSolverInputs");
-    
-
-
     return input;
 }
 
@@ -1184,93 +1156,6 @@ SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc) {
     return out;
 }
 
-// Aggregated hourly runoff for every hour in the chunk (nt = nq).
-// Writes mm/hr for each hourly bin ending at query_times[t], t=0..nq-1.
-// Seam-safe and representation-agnostic (handles GLOBAL vs LOCAL cumulatives).
-// void compute_hourly_runoff_rates(
-//     const std::vector<float>& dense,          // cumulative meters at query times
-//     const std::vector<double>& y0,            // state at chunk start (GLOBAL cumulative meters)
-//     int ns, int nq, int N_EQ,
-//     int idx_surf, int idx_total,
-//     double query_dt_min,                      // must be fixed (e.g., 60)
-//     std::vector<float>& hourly_surf_mmhr,
-//     std::vector<float>& hourly_total_mmhr
-// ) {
-//     // Shape & basic guards
-//     hourly_surf_mmhr.assign(size_t(ns) * size_t(nq), 0.0f);
-//     hourly_total_mmhr.assign(size_t(ns) * size_t(nq), 0.0f);
-//     if (ns <= 0 || nq <= 0 || N_EQ <= 0) return;
-//     if ((int)dense.size() < ns * nq * N_EQ) return;
-//     if ((int)y0.size()    < ns * N_EQ)      return;
-
-//     const double dt_hr = query_dt_min / 60.0;
-//     if (!(dt_hr > 0.0)) return;
-
-//     auto IDX = [&](int s, int t, int k) -> size_t {
-//         // Layout: ((s * nq + t) * N_EQ + k)
-//         return (size_t(s) * size_t(nq) + size_t(t)) * size_t(N_EQ) + size_t(k);
-//     };
-
-//     constexpr double EPS_MM = 1e-6;  // clamp tiny negatives / noise (mm)
-
-//     for (int s = 0; s < ns; ++s) {
-//         // GLOBAL baselines at chunk start (meters)
-//         const double base_surf_m  = y0[size_t(s) * size_t(N_EQ) + size_t(idx_surf)];
-//         const double base_total_m = y0[size_t(s) * size_t(N_EQ) + size_t(idx_total)];
-
-//         // Detect whether dense is LOCAL (since t0) or GLOBAL (since long ago)
-//         const double first_surf_m  = (double)dense[IDX(s, 0, idx_surf)];
-//         const double first_total_m = (double)dense[IDX(s, 0, idx_total)];
-//         const bool dense_is_local_surf  = first_surf_m  + 1e-12 < base_surf_m;
-//         const bool dense_is_local_total = first_total_m + 1e-12 < base_total_m;
-
-//         // --- first hour: (t0 → t1 = query_times[0]) ---
-//         {
-//             double c_surf_m  = (double)dense[IDX(s, 0, idx_surf)];
-//             double c_total_m = (double)dense[IDX(s, 0, idx_total)];
-//             if (!std::isfinite(c_surf_m )) c_surf_m  = base_surf_m;
-//             if (!std::isfinite(c_total_m)) c_total_m = base_total_m;
-
-//             // If dense is LOCAL, the baseline at t0 is 0; if GLOBAL, it's y0.
-//             const double baseline_surf_m  = dense_is_local_surf  ? 0.0        : base_surf_m;
-//             const double baseline_total_m = dense_is_local_total ? 0.0        : base_total_m;
-
-//             double dmm_surf  = (c_surf_m  - baseline_surf_m ) * 1000.0;
-//             double dmm_total = (c_total_m - baseline_total_m) * 1000.0;
-
-//             if (dmm_surf  < EPS_MM) dmm_surf  = 0.0;
-//             if (dmm_total < EPS_MM) dmm_total = 0.0;
-
-//             hourly_surf_mmhr [size_t(s) * size_t(nq) + 0] = (float)(dmm_surf  / dt_hr);
-//             hourly_total_mmhr[size_t(s) * size_t(nq) + 0] = (float)(dmm_total / dt_hr);
-//         }
-
-//         // --- remaining hours: (t1→t2), (t2→t3), … ---
-//         for (int t = 1; t < nq; ++t) {
-//             double p_surf_m  = (double)dense[IDX(s, t - 1, idx_surf)];
-//             double c_surf_m  = (double)dense[IDX(s, t,     idx_surf)];
-//             double p_total_m = (double)dense[IDX(s, t - 1, idx_total)];
-//             double c_total_m = (double)dense[IDX(s, t,     idx_total)];
-
-//             // NaN/Inf guard: hold last good value
-//             if (!std::isfinite(p_surf_m )) p_surf_m  = c_surf_m;
-//             if (!std::isfinite(p_total_m)) p_total_m = c_total_m;
-//             if (!std::isfinite(c_surf_m )) c_surf_m  = p_surf_m;
-//             if (!std::isfinite(c_total_m)) c_total_m = p_total_m;
-
-//             // Differences are representation-agnostic (GLOBAL or LOCAL)
-//             double dmm_surf  = (c_surf_m  - p_surf_m ) * 1000.0;
-//             double dmm_total = (c_total_m - p_total_m) * 1000.0;
-
-//             if (dmm_surf  < EPS_MM) dmm_surf  = 0.0;
-//             if (dmm_total < EPS_MM) dmm_total = 0.0;
-
-//             const size_t out = size_t(s) * size_t(nq) + size_t(t);
-//             hourly_surf_mmhr [out] = (float)(dmm_surf  / dt_hr);
-//             hourly_total_mmhr[out] = (float)(dmm_total / dt_hr);
-//         }
-//     }
-// }
 
 // // Drop-in: always returns rates in mm/hr
 void compute_runoff_rate_mm_per_hr(
@@ -1361,28 +1246,217 @@ struct RunoffOut {
     std::vector<float> total_mmhr;  // [ns * nq]
 };
 
+// Keeps the running end-of-chunk cumulative (in meters) for each system
+struct SeamState {
+    bool initialized = false;
+    std::vector<double> last_surf_m;   // size = num_systems
+    std::vector<double> last_total_m;  // size = num_systems
 
+    void ensure(int ns) {
+        if ((int)last_surf_m.size() != ns) {
+            last_surf_m.assign(ns, 0.0);
+            last_total_m.assign(ns, 0.0);
+            initialized = false; // first chunk for this size
+        }
+    }
+};
 
-// latest working version with debug prints doing t - (t-1)
-inline RunoffOut compute_runoff_debug(
-    const std::vector<float>& dense,   // [ns * nq * N_EQ], cumulative meters (LOCAL)
+// Global seam cache (one per process)
+static SeamState g_seam;
+// Compute mm/hr from LOCAL cumulatives by stitching a baseline from the previous chunk.
+// Output has nq bins aligned to time[0..nq-1] (bin k is from baseline/prev to time[k]).
+// Assumes dense_local contains LOCAL cumulatives (meters since the start of this chunk).
+inline RunoffOut compute_runoff_rates_stitched(
+    const std::vector<float>& dense_local,  // [ns * nq * N_EQ], LOCAL cumulatives (meters)
     int ns, int nq, int N_EQ,
     int idx_surf, int idx_total,
-    double query_dt_min,               // minutes; e.g. 60 (hourly) or 1440 (daily)
-    std::vector<int> preview_systems = {}, // e.g., {0, ns/2, ns-1}; will be sorted
-    int preview_steps = 6,
-    const char* tag = "RUNOFF",
-    bool suppress_first_bin = false
+    double query_dt_min,                    // e.g., 60
+    SeamState& seam,                        // carries baselines across chunks
+    const char* tag = "RUNOFF_STITCH"
 ) {
     RunoffOut out;
     out.surf_mmhr .assign((size_t)ns * (size_t)nq, 0.0f);
     out.total_mmhr.assign((size_t)ns * (size_t)nq, 0.0f);
 
+    if (ns <= 0 || nq <= 0 || N_EQ <= 0) return out;
+
+    const size_t need = (size_t)ns * (size_t)nq * (size_t)N_EQ;
+    if (dense_local.size() < need) return out;
+
+    const double dt_hr = query_dt_min / 60.0;
+    if (!(dt_hr > 0.0) || !std::isfinite(dt_hr)) return out;
+
+    auto IDX = [&](int s, int t, int k) -> size_t {
+        // Layout: ((s * nq + t) * N_EQ + k)
+        return ((size_t)s * (size_t)nq + (size_t)t) * (size_t)N_EQ + (size_t)k;
+    };
+
+    // Ensure seam storage sized for current ns
+    seam.ensure(ns);
+
+    // Treat tiny millimeter deltas as numerical noise
+    constexpr double ABS_EPS_MM = 1e-3; // 0.001 mm
+
+    double gmin = +1e300, gmax = -1e300;
+
+    for (int s = 0; s < ns; ++s) {
+        // ---- Monotone repair of LOCAL cumulatives (per system) ----
+        // We repair on-the-fly and compute per-bin deltas:
+        //   t==0 delta = repaired[0] - 0
+        //   t>0  delta = repaired[t] - repaired[t-1]
+        double prev_loc_surf  = 0.0;
+        double prev_loc_total = 0.0;
+
+        for (int t = 0; t < nq; ++t) {
+            double v_s = (double)dense_local[IDX(s, t, idx_surf )];
+            double v_t = (double)dense_local[IDX(s, t, idx_total)];
+
+            // NaN/Inf → hold previous repaired value
+            if (!std::isfinite(v_s)) v_s = prev_loc_surf;
+            if (!std::isfinite(v_t)) v_t = prev_loc_total;
+
+            // Enforce non-decreasing LOCAL cumulatives
+            if (v_s < prev_loc_surf ) v_s = prev_loc_surf;
+            if (v_t < prev_loc_total) v_t = prev_loc_total;
+
+            // Per-bin delta in mm
+            double dmm_surf  = (v_s - (t ? prev_loc_surf  : 0.0)) * 1000.0;
+            double dmm_total = (v_t - (t ? prev_loc_total : 0.0)) * 1000.0;
+
+            // Clamp tiny jitter; physically negative runoff is not expected here
+            if (std::abs(dmm_surf ) < ABS_EPS_MM) dmm_surf  = 0.0;
+            if (std::abs(dmm_total) < ABS_EPS_MM) dmm_total = 0.0;
+            if (dmm_surf  < 0.0) dmm_surf  = 0.0;
+            if (dmm_total < 0.0) dmm_total = 0.0;
+
+            const size_t oi = (size_t)s * (size_t)nq + (size_t)t;
+            out.surf_mmhr [oi] = (float)(dmm_surf  / dt_hr);
+            out.total_mmhr[oi] = (float)(dmm_total / dt_hr);
+
+            gmin = std::min(gmin, (double)out.surf_mmhr[oi]);
+            gmin = std::min(gmin, (double)out.total_mmhr[oi]);
+            gmax = std::max(gmax, (double)out.surf_mmhr[oi]);
+            gmax = std::max(gmax, (double)out.total_mmhr[oi]);
+
+            prev_loc_surf  = v_s;
+            prev_loc_total = v_t;
+        }
+
+        // Advance seam baselines using the **repaired** last LOCAL cumulatives
+        seam.last_surf_m[s]  += prev_loc_surf;
+        seam.last_total_m[s] += prev_loc_total;
+    }
+
+    std::printf("[%s] rate_min=%.6f mm/hr  rate_max=%.6f mm/hr\n", tag, gmin, gmax);
+    seam.initialized = true;
+    return out;
+}
+
+
+// -----------------------------------------------------------------------------
+// Global tolerances for runoff rate computation
+// -----------------------------------------------------------------------------
+constexpr double RUNOFF_ABS_EPS_MM  = 0.01;   // mm, physical jitter tolerance
+constexpr double RUNOFF_REPAIR_EPS_M = 1e-8;  // m, numeric tolerance for monotone repair
+
+inline RunoffOut compute_runoff_rates_xdiff(
+    const std::vector<float>& dense_local,  // [ns * nq * N_EQ], LOCAL cumulatives (meters)
+    int ns, int nq, int N_EQ,
+    int idx_surf, int idx_total,
+    double query_dt_min,                    // e.g., 60
+    const char* tag = "RUNOFF_XDIFF",
+    bool allow_negative = false
+) {
+    RunoffOut out;
+    const int nbins = std::max(0, nq - 1);
+    out.surf_mmhr .assign((size_t)ns * (size_t)nbins, 0.0f);
+    out.total_mmhr.assign((size_t)ns * (size_t)nbins, 0.0f);
+
+    if (ns <= 0 || nq <= 1 || N_EQ <= 0) return out;
+
+    const size_t need = (size_t)ns * (size_t)nq * (size_t)N_EQ;
+    if (dense_local.size() < need) return out;
+
+    const double dt_hr = query_dt_min / 60.0;
+    if (!(dt_hr > 0.0) || !std::isfinite(dt_hr)) return out;
+
+    auto IDX = [&](int s,int t,int k)->size_t {
+        return ((size_t)s * (size_t)nq + (size_t)t) * (size_t)N_EQ + (size_t)k;
+    };
+
+    double gmin = +1e300, gmax = -1e300;
+
+    for (int s = 0; s < ns; ++s) {
+        for (int t = 1; t < nq; ++t) {
+            // Consecutive LOCAL cumulatives (meters)
+            double a_surf  = (double)dense_local[IDX(s, t-1, idx_surf )];
+            double b_surf  = (double)dense_local[IDX(s, t  , idx_surf )];
+            double a_total = (double)dense_local[IDX(s, t-1, idx_total)];
+            double b_total = (double)dense_local[IDX(s, t  , idx_total)];
+
+            // NaN/Inf guards (hold neighbor)
+            if (!std::isfinite(a_surf )) a_surf  = b_surf;
+            if (!std::isfinite(a_total)) a_total = b_total;
+            if (!std::isfinite(b_surf )) b_surf  = a_surf;
+            if (!std::isfinite(b_total)) b_total = a_total;
+
+            // Monotone repair with numeric tolerance:
+            // if b is below a by more than RUNOFF_REPAIR_EPS_M, snap b up to a
+            if (b_surf + RUNOFF_REPAIR_EPS_M  < a_surf ) b_surf  = a_surf;
+            if (b_total + RUNOFF_REPAIR_EPS_M < a_total) b_total = a_total;
+
+            // Delta (mm) for this bin
+            double dmm_surf  = (b_surf  - a_surf ) * 1000.0;
+            double dmm_total = (b_total - a_total) * 1000.0;
+
+            // Kill tiny jitter (physical tolerance)
+            if (std::abs(dmm_surf ) < RUNOFF_ABS_EPS_MM)  dmm_surf  = 0.0;
+            if (std::abs(dmm_total) < RUNOFF_ABS_EPS_MM)  dmm_total = 0.0;
+
+            // Optional: no negative rates
+            if (!allow_negative) {
+                if (dmm_surf  < 0.0) dmm_surf  = 0.0;
+                if (dmm_total < 0.0) dmm_total = 0.0;
+            }
+
+            const size_t oi = (size_t)s * (size_t)nbins + (size_t)(t - 1);
+            const float r_s = (float)(dmm_surf  / dt_hr);
+            const float r_t = (float)(dmm_total / dt_hr);
+
+            out.surf_mmhr [oi] = r_s;
+            out.total_mmhr[oi] = r_t;
+
+            gmin = std::min(gmin, (double)r_s);
+            gmax = std::max(gmax, (double)r_s);
+            gmin = std::min(gmin, (double)r_t);
+            gmax = std::max(gmax, (double)r_t);
+        }
+    }
+
+    std::printf("[%s] nbins=%d  rate_min=%.6f mm/hr  rate_max=%.6f mm/hr  (neg=%s)\n",
+                tag, nbins, gmin, gmax, allow_negative ? "allowed" : "clamped");
+    return out;
+}
+
+// Monotone + de-jitter version (xarray.diff semantics: output has nq-1 bins)
+inline RunoffOut compute_runoff_debug(
+    const std::vector<float>& dense,   // [ns * nq * N_EQ], LOCAL cumulatives in meters
+    int ns, int nq, int N_EQ,
+    int idx_surf, int idx_total,
+    double query_dt_min,               // minutes; e.g., 60
+    std::vector<int> preview_systems = {},
+    int preview_steps = 6,
+    const char* tag = "RUNOFF_DIFF"
+) {
+    RunoffOut out;
+    const int nbins = std::max(0, nq - 1);
+    out.surf_mmhr .assign((size_t)ns * (size_t)nbins, 0.0f);
+    out.total_mmhr.assign((size_t)ns * (size_t)nbins, 0.0f);
+
     if (ns <= 0 || nq <= 1 || N_EQ <= 0) {
         std::printf("[%s] Nothing to compute (ns=%d nq=%d N_EQ=%d)\n", tag, ns, nq, N_EQ);
         return out;
     }
-
     const size_t need = (size_t)ns * (size_t)nq * (size_t)N_EQ;
     if (dense.size() < need) {
         std::fprintf(stderr, "[%s][ERR] dense too small (%zu < %zu)\n", tag, dense.size(), need);
@@ -1395,203 +1469,95 @@ inline RunoffOut compute_runoff_debug(
         return out;
     }
 
-    auto IDX = [&](int s, int t, int k) -> size_t { 
+    // Tunables:
+    // tiny absolute delta in mm to treat as 0 (post-diff, pre-division)
+    constexpr double ABS_EPS_MM   = 1e-3;   // 0.001 mm
+    // tiny relative delta (to magnitude) to treat as 0
+    constexpr double REL_EPS      = 1e-7;
+    // hard floor on *rates* (mm/hr) to squash residual wiggles
+    constexpr double RATE_FLOOR   = 1e-3;   // 0.001 mm/hr
+
+    auto IDX = [&](int s, int t, int k) -> size_t {
         // Layout: ((s * nq + t) * N_EQ + k)
         return ((size_t)s * (size_t)nq + (size_t)t) * (size_t)N_EQ + (size_t)k;
     };
 
-    constexpr double EPS_MM = 1e-6;
-
+    // Prepare preview list
     if (preview_systems.empty()) {
         if (ns >= 1) preview_systems.push_back(0);
         if (ns >= 2) preview_systems.push_back(ns / 2);
         if (ns >= 3) preview_systems.push_back(ns - 1);
     }
     std::sort(preview_systems.begin(), preview_systems.end());
-    preview_systems.erase(std::unique(preview_systems.begin(), preview_systems.end()), preview_systems.end());
+    preview_systems.erase(std::unique(preview_systems.begin(), preview_systems.end()),
+                          preview_systems.end());
 
     double gmin = +1e300, gmax = -1e300;
 
     for (int s = 0; s < ns; ++s) {
-        for (int t = 0; t < nq - 1; ++t) {
-            const double c0_surf  = (double)dense[IDX(s, t, idx_surf)]; // current cumulative
-            const double c1_surf  = (double)dense[IDX(s, t+1, idx_surf)]; // next cumulative
-            const double c0_total = (double)dense[IDX(s, t, idx_total)]; // current cumulative
-            const double c1_total = (double)dense[IDX(s, t+1, idx_total)]; // next cumulative
+        for (int t = 0; t < nbins; ++t) {
+            // consecutive cumulatives (meters)
+            double a_surf  = (double)dense[IDX(s, t,     idx_surf )];
+            double b_surf  = (double)dense[IDX(s, t + 1, idx_surf )];
+            double a_total = (double)dense[IDX(s, t,     idx_total)];
+            double b_total = (double)dense[IDX(s, t + 1, idx_total)];
 
-            double dmm_surf  = (c1_surf  - c0_surf ) * 1000.0; // delta mm
-            double dmm_total = (c1_total - c0_total) * 1000.0; // delta mm
+            // NaN/Inf guards (hold neighbor)
+            if (!std::isfinite(a_surf )) a_surf  = b_surf;
+            if (!std::isfinite(a_total)) a_total = b_total;
+            if (!std::isfinite(b_surf )) b_surf  = a_surf;
+            if (!std::isfinite(b_total)) b_total = a_total;
 
-            if (suppress_first_bin && t == 0) { // optionally suppress first bin
-                dmm_surf  = 0.0;
-                dmm_total = 0.0;
-            }
+            // Local monotone repair (cumulative cannot decrease)
+            if (b_surf  < a_surf )  b_surf  = a_surf;
+            if (b_total < a_total)  b_total = a_total;
 
-            // clamp small negative noise
-            if (dmm_surf  < 0.0 && dmm_surf  > -EPS_MM) dmm_surf  = 0.0;
-            if (dmm_total < 0.0 && dmm_total > -EPS_MM) dmm_total = 0.0;
+            // meters → mm deltas for this bin
+            double dmm_surf  = (b_surf  - a_surf ) * 1000.0;
+            double dmm_total = (b_total - a_total) * 1000.0;
 
-            const size_t oi = (size_t)s * (size_t)nq + (size_t)t; // output index
-            out.surf_mmhr [oi] = (float)(dmm_surf  / dt_hr); // mm/hr
-            out.total_mmhr[oi] = (float)(dmm_total / dt_hr); // mm/hr
+            // Relative + absolute epsilon on the *delta* magnitude
+            const double mag_s_mm = std::max({std::abs(a_surf)*1000.0, std::abs(b_surf)*1000.0, 1.0});
+            const double mag_t_mm = std::max({std::abs(a_total)*1000.0, std::abs(b_total)*1000.0, 1.0});
+            const double eps_s = std::max(ABS_EPS_MM, REL_EPS * mag_s_mm);
+            const double eps_t = std::max(ABS_EPS_MM, REL_EPS * mag_t_mm);
 
-            gmin = std::min(gmin, (double)out.surf_mmhr[oi]);
-            gmin = std::min(gmin, (double)out.total_mmhr[oi]);
-            gmax = std::max(gmax, (double)out.surf_mmhr[oi]);
-            gmax = std::max(gmax, (double)out.total_mmhr[oi]);
+            if (std::abs(dmm_surf ) < eps_s) dmm_surf  = 0.0;
+            if (std::abs(dmm_total) < eps_t) dmm_total = 0.0;
 
+            // Convert to rates (mm/hr) and apply a hard floor
+            const size_t oi = (size_t)s * (size_t)nbins + (size_t)t;
+            float r_s = (float)(dmm_surf  / dt_hr);
+            float r_t = (float)(dmm_total / dt_hr);
+
+            if (std::abs(r_s) < RATE_FLOOR) r_s = 0.0f;
+            if (std::abs(r_t) < RATE_FLOOR) r_t = 0.0f;
+
+            out.surf_mmhr [oi] = r_s;
+            out.total_mmhr[oi] = r_t;
+
+            gmin = std::min(gmin, (double)r_s);
+            gmin = std::min(gmin, (double)r_t);
+            gmax = std::max(gmax, (double)r_s);
+            gmax = std::max(gmax, (double)r_t);
+
+            // Light preview
             if (std::binary_search(preview_systems.begin(), preview_systems.end(), s) &&
                 t < preview_steps)
             {
-                std::printf("[%s] s=%d t=%d  c0_surf=%.6f  c1_surf=%.6f  Δsurf=%.6f mm → rate=%.6f mm/hr\n",
-                            tag, s, t, c0_surf, c1_surf, dmm_surf, out.surf_mmhr[oi]);
+                std::printf("[%s] s=%d t=%d  aS=%.9g bS=%.9g ΔS=%.6g mm → %.6g mm/hr | "
+                            "aT=%.9g bT=%.9g ΔT=%.6g mm → %.6g mm/hr\n",
+                            tag, s, t,
+                            a_surf, b_surf, dmm_surf, r_s,
+                            a_total, b_total, dmm_total, r_t);
             }
         }
     }
 
-    std::printf("[%s] Summary: rate_min=%.6f mm/hr  rate_max=%.6f mm/hr\n", tag, gmin, gmax);
+    std::printf("[%s] Summary: rate_min=%.6f mm/hr  rate_max=%.6f mm/hr  (floor=%.3g)\n",
+                tag, gmin, gmax, RATE_FLOOR);
     return out;
 }
-
-
-// old version
-// inline RunoffOut compute_runoff_debug(
-//     const std::vector<float>& dense,   // [ns * nq * N_EQ], cumulative meters (LOCAL)
-//     int ns, int nq, int N_EQ,
-//     int idx_surf, int idx_total,
-//     double query_dt_min,               // minutes; e.g. 60 (hourly) or 1440 (daily)
-//     std::vector<int> preview_systems = {}, // e.g., {0, ns/2, ns-1}; will be sorted
-//     int preview_steps = 6,
-//     const char* tag = "RUNOFF",
-//     bool suppress_first_bin = false
-// ) {
-//     RunoffOut out;
-//     out.surf_mmhr .assign((size_t)ns * (size_t)nq, 0.0f);
-//     out.total_mmhr.assign((size_t)ns * (size_t)nq, 0.0f);
-
-//     // Basic guards
-//     if (ns <= 0 || nq <= 0 || N_EQ <= 0) {
-//         std::printf("[%s] Nothing to compute (ns=%d nq=%d N_EQ=%d)\n", tag, ns, nq, N_EQ);
-//         return out;
-//     }
-//     const size_t need = (size_t)ns * (size_t)nq * (size_t)N_EQ;
-//     if (dense.size() < need) {
-//         std::fprintf(stderr, "[%s][ERR] dense too small (%zu < %zu)\n", tag, dense.size(), need);
-//         return out;
-//     }
-
-//     // Fixed bin width (hours)
-//     const double dt_hr = query_dt_min / 60.0;
-//     if (!(dt_hr > 0.0) || !std::isfinite(dt_hr)) {
-//         std::fprintf(stderr, "[%s][ERR] invalid query_dt_min=%.6f (min)\n", tag, query_dt_min);
-//         return out;
-//     }
-
-//     // Index helper: ((s * nq + t) * N_EQ + k)
-//     auto IDX = [&](int s, int t, int k) -> size_t {
-//         return ((size_t)s * (size_t)nq + (size_t)t) * (size_t)N_EQ + (size_t)k;
-//     };
-
-//     // Clamp very small negatives (floating noise) to zero (mm)
-//     constexpr double EPS_MM = 1e-6;
-
-//     // Normalize preview list (sorted & dedup → safe for binary_search)
-//     if (preview_systems.empty()) {
-//         if (ns >= 1) preview_systems.push_back(0);
-//         if (ns >= 2) preview_systems.push_back(ns / 2);
-//         if (ns >= 3) preview_systems.push_back(ns - 1);
-//     }
-//     std::sort(preview_systems.begin(), preview_systems.end());
-//     preview_systems.erase(std::unique(preview_systems.begin(), preview_systems.end()),
-//                           preview_systems.end());
-
-//     double gmin = +1e300, gmax = -1e300;
-
-//     for (int s = 0; s < ns; ++s) {
-//         // LOCAL baseline at t0 for this chunk
-//         double prev_surf_m  = 0.0;
-//         double prev_total_m = 0.0;
-
-//         for (int t = 0; t < nq; ++t) {
-//             // Current cumulative (meters) at bin endpoint t
-//             double c_surf_m  = (double)dense[IDX(s, t, idx_surf)];
-//             double c_total_m = (double)dense[IDX(s, t, idx_total)];
-
-//             int t2 = t+1;
-
-//             // Current cumulative (meters) at bin endpoint t+1
-//             double c_surf_m  = (double)dense[IDX(s, t2, idx_surf)];
-//             double c_total_m = (double)dense[IDX(s, t2, idx_total)];
-
-//             // NaN/Inf guard: hold previous value if bad
-//             if (!std::isfinite(c_surf_m )) c_surf_m  = prev_surf_m;
-//             if (!std::isfinite(c_total_m)) c_total_m = prev_total_m;
-
-//             // Delta (meters) then convert to mm
-//             double dmm_surf  = (c_surf_m  - prev_surf_m ) * 1000.0;
-//             double dmm_total = (c_total_m - prev_total_m) * 1000.0;
-
-//             // Optionally force the first aggregated bin to zero (mm) for all systems
-//             if (suppress_first_bin && t == 0) {
-//                 dmm_surf  = 0.0;
-//                 dmm_total = 0.0;
-//             }
-
-//             // Clamp small negatives to zero
-//             if (dmm_surf  < EPS_MM) dmm_surf  = 0.0;
-//             if (dmm_total < EPS_MM) dmm_total = 0.0;
-
-//             // Divide by bin width (hours) → mm/hr
-//             const size_t oi = (size_t)s * (size_t)nq + (size_t)t;
-//             out.surf_mmhr [oi] = (float)(dmm_surf  / dt_hr);
-//             out.total_mmhr[oi] = (float)(dmm_total / dt_hr);
-
-//             // Track global min/max (across both series)
-//             gmin = std::min(gmin, (double)out.surf_mmhr[oi]);
-//             gmin = std::min(gmin, (double)out.total_mmhr[oi]);
-//             gmax = std::max(gmax, (double)out.surf_mmhr[oi]);
-//             gmax = std::max(gmax, (double)out.total_mmhr[oi]);
-
-//             // Light preview
-//             if (std::binary_search(preview_systems.begin(), preview_systems.end(), s) &&
-//                 t < preview_steps)
-//             {
-//                 std::printf("[%s] s=%d t=%d  cum_surf=%.6f m  cum_total=%.6f m  "
-//                             "Δsurf=%.6f mm  Δtotal=%.6f mm  → rate_surf=%.6f mm/hr  rate_total=%.6f mm/hr\n",
-//                             tag, s, t, c_surf_m, c_total_m,
-//                             dmm_surf, dmm_total,
-//                             out.surf_mmhr[oi], out.total_mmhr[oi]);
-//             }
-
-//             // Advance baseline
-//             prev_surf_m  = c_surf_m;
-//             prev_total_m = c_total_m;
-//         }
-
-//         // Optional closure checks (only for preview systems):
-//         // Sum over rates * dt should equal last cumulative (in mm)
-//         if (std::binary_search(preview_systems.begin(), preview_systems.end(), s)) {
-//             double sum_total_mm = 0.0, sum_surf_mm = 0.0;
-//             for (int t = 0; t < nq; ++t) {
-//                 const size_t oi = (size_t)s * (size_t)nq + (size_t)t;
-//                 sum_surf_mm  += (double)out.surf_mmhr [oi] * dt_hr;
-//                 sum_total_mm += (double)out.total_mmhr[oi] * dt_hr;
-//             }
-//             const double last_cum_surf_mm  = 1000.0 * (double)dense[IDX(s, nq-1, idx_surf )];
-//             const double last_cum_total_mm = 1000.0 * (double)dense[IDX(s, nq-1, idx_total)];
-//             std::printf("[AGG-CHECK] s=%d  SURF:  last=%.6f  sum=%.6f  diff=%.6f mm\n",
-//                         s, last_cum_surf_mm , sum_surf_mm , sum_surf_mm  - last_cum_surf_mm);
-//             std::printf("[AGG-CHECK] s=%d  TOTAL: last=%.6f  sum=%.6f  diff=%.6f mm\n",
-//                         s, last_cum_total_mm, sum_total_mm, sum_total_mm - last_cum_total_mm);
-//         }
-//     }
-
-//     std::printf("[%s] Summary: rate_min=%.6f mm/hr  rate_max=%.6f mm/hr\n", tag, gmin, gmax);
-//     return out;
-// }
-
-
-
 
 
 // ───────── Handle outputs from the solver: retrieve results, write NetCDF files
@@ -1639,74 +1605,20 @@ void handleSolverOutputs(const ModelConfig& config,
                 << "\n";
     }
 
-
-    // ── Hourly aggregated runoff (mm/hr) ── 
-    // std::vector<float> hourly_surf_mmhr, hourly_total_mmhr;
-
-    // compute_hourly_runoff_rates_mm_per_hr(
-    //     h_dense, input.h_y0,  // need y0 at chunk start for global→local
-    //     ns, nq, N_EQ,
-    //     Runoff5::STATE_SURF_RUNOFF,
-    //     Runoff5::STATE_TOTAL_RUNOFF,
-    //     GLOBAL_QUERY_DT,
-    //     hourly_surf_mmhr,
-    //     hourly_total_mmhr
-    // );
-
-    // // Quick sanity peek
-    // if (rank==0 && ns>0 && nq>0) {
-    //     std::cout << std::setprecision(12)
-    //             << "[RUNOFF] first=" << runoff_surf_mmhr[0] << " mm/hr, "
-    //             << "last="  << runoff_surf_mmhr[nq-1] << " mm/hr\n";
-    // }
-
-    std::vector<float> hourly_surf_mmhr, hourly_total_mmhr;
-
-    // compute_runoff_rate_mm_per_hr(
-    //     h_dense, input.h_y0,    // need y0 at chunk start for global→local vs global
-    //     ns, nq, N_EQ,
-    //     Runoff5::STATE_SURF_RUNOFF,
-    //     Runoff5::STATE_TOTAL_RUNOFF,
-    //     GLOBAL_QUERY_DT,        // minutes → function converts to hours
-    //     hourly_surf_mmhr,
-    //     hourly_total_mmhr
-    // );
-
-    // Build query times (minutes) from input.h_query_times
-    std::vector<double> qt = input.h_query_times;
-
-//    RunoffOut r = compute_runoff_debug(
-//         /*dense=*/h_dense,
-//         /*ns=*/ns,
-//         /*nq=*/nq,
-//         /*N_EQ=*/N_EQ,
-//         /*idx_surf=*/Runoff5::STATE_SURF_RUNOFF,
-//         /*idx_total=*/Runoff5::STATE_TOTAL_RUNOFF,
-//         /*query_dt_min=*/GLOBAL_QUERY_DT,
-//         /*tag=*/"RUNOFF"
-//     );
-    RunoffOut r = compute_runoff_debug(
-        /*dense=*/h_dense,
-        /*ns=*/ns, /*nq=*/nq, /*N_EQ=*/N_EQ,
-        /*idx_surf=*/Runoff5::STATE_SURF_RUNOFF,
-        /*idx_total=*/Runoff5::STATE_TOTAL_RUNOFF,
-        /*query_dt_min=*/GLOBAL_QUERY_DT,
-        /*preview_systems=*/{0, std::max(0,ns/2), std::max(0,ns-1)},
-        /*preview_steps=*/6,
-        /*tag=*/"RUNOFF"
+    // Compute runoff rates (now with t0 included in queries)
+    RunoffOut r = compute_runoff_rates_xdiff(
+        h_dense, ns, nq, N_EQ,
+        Runoff5::STATE_SURF_RUNOFF,
+        Runoff5::STATE_TOTAL_RUNOFF,
+        GLOBAL_QUERY_DT,
+        "RUNOFF_XDIFF",
+        false
     );
 
+    // Output has (nq-1) bins aligned to time[1:nq]
+    const int nt_hourly = std::max(0, nq - 1);
+    const double* hourly_times = (nq > 1) ? (input.h_query_times.data() + 1) : nullptr;
 
-    // Use the results
-    hourly_surf_mmhr  = std::move(r.surf_mmhr);
-    hourly_total_mmhr = std::move(r.total_mmhr);
-
-    // (Optional) guard before indexing/printing
-    if (rank==0 && ns>0 && nq>0 && !hourly_surf_mmhr.empty()) {
-        std::cout << std::setprecision(12)
-                << "[RUNOFF] first=" << hourly_surf_mmhr[0] << " mm/hr, "
-                << "last="          << hourly_surf_mmhr[nq-1] << " mm/hr\n";
-    }
 
     // Compact sanity stats (few prints only)!!!
     auto vec_minmax = [&](const std::vector<float>& v){
@@ -1715,46 +1627,6 @@ void handleSolverOutputs(const ModelConfig& config,
         return std::tuple<double,double,double>(mn,mx,sum);
     };
 
-    // Look at first 3 systems only to keep output tiny
-    for (int s : std::vector<int>{0, ns/2, ns-1}) {
-        if (s < 0 || s >= ns || nq == 0) continue;
-
-        // last cumulative meters (dense) for this system
-        auto IDX = [&](int s,int t,int k)->size_t {
-            return (size_t(s)*size_t(nq)+size_t(t))*size_t(N_EQ)+size_t(k);
-        };
-        double last_cum_surf_mm  = 1000.0 * (double)h_dense[IDX(s, nq-1, Runoff5::STATE_SURF_RUNOFF)];
-        double last_cum_total_mm = 1000.0 * (double)h_dense[IDX(s, nq-1, Runoff5::STATE_TOTAL_RUNOFF)];
-
-        // rates mm/hr slice for this system
-        std::vector<float> r_s(nq), r_t(nq);
-        for (int t=0; t<nq; ++t) {
-            r_s[t] = hourly_surf_mmhr [size_t(s)*size_t(nq)+t];
-            r_t[t] = hourly_total_mmhr[size_t(s)*size_t(nq)+t];
-        }
-        auto [mnS, mxS, sumS] = vec_minmax(r_s);
-        auto [mnT, mxT, sumT] = vec_minmax(r_t);
-
-        // The sums are in (mm/hr) * hr = mm because Δt=1 hr
-        std::printf("[AGG] s=%d  cum_surf_end=%.6f mm  cum_total_end=%.6f mm  "
-                    "rate_surf[min,max,sum]=[%.6f, %.6f, %.6f] mm  "
-                    "rate_total[min,max,sum]=[%.6f, %.6f, %.6f] mm\n",
-                    s, last_cum_surf_mm, last_cum_total_mm,
-                    mnS, mxS, sumS, mnT, mxT, sumT);
-    }
-
-
-// !!!
-    
-
-
-    // Quick sanity peek (always mm/hr)
-    if (rank == 0 && ns > 0 && nq > 0) {
-        std::cout << std::setprecision(12)
-                << "[RUNOFF] first=" << hourly_surf_mmhr[0] << " mm/hr, "
-                << "last="          << hourly_surf_mmhr[nq-1] << " mm/hr\n";
-    }
-
 
     
     // Helper for indexing dense array: ((s * nq + t) * N_EQ + k)
@@ -1762,7 +1634,7 @@ void handleSolverOutputs(const ModelConfig& config,
         return (size_t(s)*size_t(nq)+size_t(t))*size_t(N_EQ)+size_t(k);
     };
 
-    // 🔹 Define state indices before using them
+    // Define state indices before using them
     constexpr int IDX_SURF  = Runoff5::STATE_SURF_RUNOFF;
     constexpr int IDX_TOTAL = Runoff5::STATE_TOTAL_RUNOFF;
 
@@ -1797,10 +1669,6 @@ void handleSolverOutputs(const ModelConfig& config,
     std::string runoff_file   = config.output_path + "/runoff_"  + sDate + "_" + eDate + rank_tag + ".nc";
 
 
-    // Time for hourly intervals (skip first dense)
-    const double* hourly_times = input.h_query_times.data();
-    int nt_hourly = nq;
-
     // Prepare metadata arrays
     std::vector<uint32_t> link_ids(ns);
     for (int i = 0; i < ns; ++i) {
@@ -1834,31 +1702,22 @@ void handleSolverOutputs(const ModelConfig& config,
         std::cout << "[SKIP] dense output disabled via config\n";
     }
 
-
-    // Write selected runoff states
+    // Make hourly arrays now
+    std::vector<float> hourly_surf_mmhr  = std::move(r.surf_mmhr);
+    std::vector<float> hourly_total_mmhr = std::move(r.total_mmhr);
     if (!config.runoff_output_file.empty()) {
         logWrite(std::filesystem::path(runoff_file).filename().string());
-        // write_runoff_dense_netcdf(runoff_file, // writes the cumulative runoff states at all query times
-        //                         h_dense.data(),
-        //                         input.h_query_times.data(),
-        //                         link_ids.data(),
-        //                         nq, ns,
-        //                         time_origin);
-
         write_runoff_rates_netcdf(
             runoff_file,
-            /*surf_mmhr*/  hourly_surf_mmhr.data(),
-            /*total_mmhr*/ hourly_total_mmhr.data(),
-            /*time_vals*/  hourly_times,
+            /*surf_mmhr*/  hourly_surf_mmhr.data(),   // ns * nq
+            /*total_mmhr*/ hourly_total_mmhr.data(),  // ns * nq
+            /*time_vals*/  hourly_times,              // length nq, endpoints for each bin
             /*link_ids*/   link_ids.data(),
             /*num_systems*/ns,
-            /*num_queries*/nt_hourly,
+            /*num_queries*/nt_hourly,                 // nq
             /*origin*/     time_origin
         );
-    } else {
-        std::cout << "[SKIP] runoff output disabled via config\n";
-    }
-
+    } 
 
     //std::cout << "[DONE] Outputs written for " << ns << " systems × " << nq << " time steps\n";
     std::cout << "[DONE] Rank " << rank << ": Outputs written for "
@@ -2123,11 +1982,6 @@ if (config.initial_mode == "from_file") {
               << config.initial_file << "\n";
     load_initial_from_final_nc_serial(config.initial_file, streams);
 }
-
-// Checking spatial params of first stream !!!
-// if (!streams.empty()) {
-//     printSpatialParams(streams.front().sp);
-// }
 
 // Now upload and run
 setupGpu(spatialParams, streams);
