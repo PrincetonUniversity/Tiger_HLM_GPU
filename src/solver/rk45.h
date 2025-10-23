@@ -48,6 +48,7 @@ __global__ void rk45_then_radau_multi(
     double  t0,                             // initial time of integration
     double  tf,                             // final time of integration
     const typename Model::SP_TYPE* d_sp,    // device pointer to spatial parameters for each system
-    int*    d_stiff);                        // flags for stiffness detection 
+    int*    d_stiff,                        // flags for stiffness detection 
+    const long* stream_ids);                // device pointer to stream IDs for debugging
 
 #endif  // RK45_H
