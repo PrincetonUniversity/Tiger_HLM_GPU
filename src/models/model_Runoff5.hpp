@@ -137,6 +137,10 @@ struct Runoff5
         double temperature = (nForc>1 ? F[1]    : 0.0);
         if (!finite_val(rainfall))    rainfall = 0.0; // only NaN/±Inf → 0
         if (!finite_val(temperature)) temperature = 0.0; // only NaN/±Inf → 0
+        // Apply rainfall threshold: ignore drizzle < 0.1 mm/hr
+        // constexpr double RAIN_THRESH_M_PER_MIN = 0.1 * 0.001 / 60.0; // 0.1 mm/hr → m/min
+        // if (rainfall < RAIN_THRESH_M_PER_MIN) rainfall = 0.0;
+
         double doy        = 1.0 + t/1440.0;
 
         // ── 4) compute ET for static tank─────────────────────
@@ -193,6 +197,10 @@ struct Runoff5
                 dydt[STATE_SNOW] = -snowmelt;
             }
         }
+
+        // Disable snow completely:
+        // dydt[STATE_SNOW] = 0.0;
+        // double x1 = rainfall;  // all precip becomes immediate rainfall
 
         // ── 8) static tank ─────────────────────────────────────
         double x2 = fmax(0.0, x1 + h_stat - Hu); // water that enters second storage (surface) tank [m/min]
