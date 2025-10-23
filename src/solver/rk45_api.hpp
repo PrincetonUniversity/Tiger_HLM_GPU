@@ -170,7 +170,7 @@ auto setup_gpu_buffers(
 }
 
 template<class Runoff5>
-std::pair<FinalType, DenseType> retrieve_and_free(
+std::tuple<FinalType, DenseType, std::vector<int>> retrieve_and_free(
     double* d_y0_all,
     double* d_y_final_all,
     double* d_query_times,
@@ -244,7 +244,8 @@ std::pair<FinalType, DenseType> retrieve_and_free(
     }
 
     return { std::move(h_y_final_all),
-             std::move(h_dense_all) };
+             std::move(h_dense_all),
+             std::move(h_stiff)};
 }
 
 
