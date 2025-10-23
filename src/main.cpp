@@ -845,7 +845,7 @@ void simulateChunk(const ModelConfig& config,
     // ───────── Launch ODE solver on GPU ─────────
     TimePoint t_solver_start = Clock::now();
     std::cout << "[HOST DEBUG] Launching kernel with nForc=" << forcingChunk.nForc << std::endl;
-    SolverOutputs solverOutputs = launchSolverKernel(solverInputs, forcingChunk.nForc);
+    SolverOutputs solverOutputs = launchSolverKernel(solverInputs, forcingChunk.nForc, streams);
     TimePoint t_solver_end = Clock::now();
     logTimer("Solver runtime", elapsedSeconds(t_solver_start, t_solver_end));
 
@@ -1088,7 +1088,7 @@ SolverInputs prepareSolverInputs(int simYear,
 
 
 // ───────── Allocate GPU buffers and launch solver kernel
-SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc) {
+SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc, const std::vector<Stream<Runoff5>>& streams) {
     SolverOutputs out;
     int num_queries = input.h_query_times.size();
     int num_systems = input.h_y0.size() / Runoff5::N_EQ;
@@ -1097,6 +1097,19 @@ SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc) {
     auto [d_y0_all, d_y_final_all, d_query_times,
         d_dense_ptr, d_stiff_ptr, sys_count, query_count] =
         setup_gpu_buffers<Runoff5>(input.h_y0, input.h_query_times);
+
+    // Fill device outputs with sentinel values to catch uninitialized systems
+    std::vector<double> h_y_final_all(sys_count * Runoff5::N_EQ, -999.0);
+    CUDA_CHECK(cudaMemcpy(d_y_final_all, h_y_final_all.data(),
+                        sizeof(double) * sys_count * Runoff5::N_EQ,
+                        cudaMemcpyHostToDevice));
+
+    // Fill d_stiff with sentinel -1
+    std::vector<int> h_stiff_init(sys_count, -1);
+    CUDA_CHECK(cudaMemcpy(d_stiff_ptr, h_stiff_init.data(),
+                        sizeof(int) * sys_count,
+                        cudaMemcpyHostToDevice));
+
 
     // Assign to output struct
     out.d_y0_all      = d_y0_all;
@@ -1140,6 +1153,18 @@ SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc) {
     SpatialParams* d_sp = nullptr;
     cudaMemcpyFromSymbol(&d_sp, devSpatialParamsPtr, sizeof(d_sp));
 
+    // [NEW] Allocate and upload stream IDs for debugging
+    std::vector<long> h_stream_ids(num_systems);
+    for (int i = 0; i < num_systems; ++i) {
+        h_stream_ids[i] = streams[i].id;
+    }
+
+    long* d_stream_ids = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_stream_ids, num_systems * sizeof(long)));
+    CUDA_CHECK(cudaMemcpy(d_stream_ids, h_stream_ids.data(),
+                        num_systems * sizeof(long), cudaMemcpyHostToDevice));
+
+
     // Launch the solver
     rk45_then_radau_multi<Runoff5><<<numBlocks, blockSize>>>(
         out.d_y0_all, out.d_y_final_all,    // Initial and final states
@@ -1147,14 +1172,97 @@ SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc) {
         out.num_systems, out.num_queries,   // Number of systems and queries
         input.t0, input.tf,                 // Simulation time bounds
         d_sp,                               // Device pointer to spatial parameters
-        out.d_stiff                        // Flags buffer
+        out.d_stiff,                        // Flags buffer
+        d_stream_ids                        // Device pointer to stream IDs
     );
 
     CUDA_CHECK( cudaPeekAtLastError() );     // reports launch-time errors
     CUDA_CHECK( cudaDeviceSynchronize() );   // catches run-time errors
+    CUDA_CHECK(cudaFree(d_stream_ids));   // Free stream IDs buffer
 
     return out;
 }
+
+// ───────── Allocate GPU buffers and launch solver kernel
+// SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc) {
+//     SolverOutputs out;
+//     const int num_queries = static_cast<int>(input.h_query_times.size());
+//     const int num_systems = static_cast<int>(input.h_y0.size()) / Runoff5::N_EQ;
+
+//     // Build a seconds copy of the query times (kernel expects SECONDS)
+//     std::vector<double> h_query_times_sec(input.h_query_times);
+//     for (double &tq : h_query_times_sec) tq *= 60.0;
+
+//     // Setup device buffers using the SECONDS query vector
+//     auto [d_y0_all, d_y_final_all, d_query_times,
+//           d_dense_ptr, d_stiff_ptr, sys_count, query_count] =
+//         setup_gpu_buffers<Runoff5>(input.h_y0, h_query_times_sec);
+
+//     // Assign to output struct
+//     out.d_y0_all      = d_y0_all;
+//     out.d_y_final_all = d_y_final_all;
+//     out.d_query_times = d_query_times;
+//     out.d_dense_all   = d_dense_ptr;
+//     out.d_stiff       = d_stiff_ptr;
+//     out.num_systems   = sys_count;
+//     out.num_queries   = query_count;
+
+//     // Compute dense buffer size safely (use size_t to avoid 32-bit overflow)
+//     const size_t dense_elems =
+//         size_t(out.num_systems) * size_t(Runoff5::N_EQ) * size_t(out.num_queries);
+//     const size_t dense_bytes = dense_elems * sizeof(float); // dense output is float
+
+//     // Paranoid overflow guard
+//     if (out.num_systems > 0 && out.num_queries > 0) {
+//         const size_t back = dense_elems / size_t(Runoff5::N_EQ) / size_t(out.num_queries);
+//         if (back != size_t(out.num_systems)) {
+//             throw std::runtime_error("Overflow computing dense buffer size");
+//         }
+//     }
+
+//     CUDA_CHECK(cudaMemset(out.d_dense_all, 0xAB, dense_bytes));
+
+//     // Determine launch configuration
+//     int blockSize = 0, minGridSize = 0;
+//     cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize,
+//                                        rk45_then_radau_multi<Runoff5>, 0, 0);
+//     const int numBlocks = (out.num_systems + blockSize - 1) / blockSize;
+
+//     logGpu("Launching kernel: blocks=" + std::to_string(numBlocks) +
+//            ", threads=" + std::to_string(blockSize));
+//     logGpu("Systems=" + std::to_string(out.num_systems) +
+//            ", Queries=" + std::to_string(out.num_queries));
+
+//     // Spatial params device pointer
+//     SpatialParams* d_sp = nullptr;
+//     cudaMemcpyFromSymbol(&d_sp, devSpatialParamsPtr, sizeof(d_sp));
+
+//     // Convert window to SECONDS (kernel expects seconds)
+//     const double t0_sec = 60.0 * input.t0;
+//     const double tf_sec = 60.0 * input.tf;
+//     {
+//         char buf[160];
+//         std::snprintf(buf, sizeof(buf), "[LAUNCH] window=%.0f s (nq=%d)",
+//                       tf_sec - t0_sec, out.num_queries);
+//         logGpu(buf);
+//     }
+
+//     // Launch the solver (times and queries are in SECONDS)
+//     rk45_then_radau_multi<Runoff5><<<numBlocks, blockSize>>>(
+//         out.d_y0_all, out.d_y_final_all,     // Initial and final states
+//         out.d_query_times, out.d_dense_all,  // Query times (seconds) and dense output
+//         out.num_systems, out.num_queries,    // Number of systems and queries
+//         t0_sec, tf_sec,                      // Bounds (seconds)
+//         d_sp,                                // Spatial parameters on device
+//         out.d_stiff                          // Flags buffer
+//     );
+
+//     CUDA_CHECK(cudaPeekAtLastError());   // launch-time errors
+//     CUDA_CHECK(cudaDeviceSynchronize()); // runtime errors
+
+//     return out;
+// }
+
 
 
 // // Drop-in: always returns rates in mm/hr
@@ -1574,7 +1682,7 @@ void handleSolverOutputs(const ModelConfig& config,
     const int nq   = output.num_queries;
 
     // Retrieve results from device and free buffers
-    auto [h_y_final, h_dense] = retrieve_and_free<Runoff5>(
+    auto [h_y_final, h_dense, h_stiff] = retrieve_and_free<Runoff5>(
         output.d_y0_all, output.d_y_final_all,
         output.d_query_times, output.d_dense_all,
         output.d_stiff,
@@ -1582,6 +1690,24 @@ void handleSolverOutputs(const ModelConfig& config,
         input.t0, input.tf,
         devSpatialParamsPtr
     );
+
+    // Count how many systems were skipped early due to t≈0 stall
+    int early_stiff_total = 0;
+    for (int i = 0; i < ns; ++i) {
+        if (h_stiff[i] == 66) early_stiff_total++;
+    }
+    std::cout << "[SUMMARY] Total early-stiff systems skipped (code 66): "
+            << early_stiff_total << "\n";
+
+
+    // Sanity check: look for missing final states
+    int missing = 0;
+    for (size_t i = 0; i < h_y_final.size(); ++i) {
+        if (fabs(h_y_final[i] + 999.0) < 1e-6) missing++;
+    }
+    std::cout << "[CHECK] y_final_all: missing entries = " << missing
+            << " out of " << h_y_final.size() << "\n";
+
 
     // ── Seam check: look at the very last interval in this chunk ──
     if (rank==0 && ns>0 && nq>=2) {
