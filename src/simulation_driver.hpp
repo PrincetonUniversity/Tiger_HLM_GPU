@@ -69,7 +69,7 @@ SolverInputs prepareSolverInputs(int simYear,                                   
 /**
  * @brief Launches the solver on the GPU.
  */
-SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc); // Solver inputs
+SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc, const std::vector<Stream<Runoff5>>& streams); // Solver inputs
 
 /**
  * @brief Transfers and post-processes the solver outputs.
