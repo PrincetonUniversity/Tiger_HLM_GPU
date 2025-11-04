@@ -4,6 +4,21 @@
 #include "../I_O/parameters_loader.hpp"  // for SpatialParams
 #include <cuda_runtime.h>
 
+// Shared solver parameters in constant memory 
+struct DevParams {
+    double rtol;
+    double atol;
+    double initialStep;
+    double safety;
+    double minScale;
+    double maxScale;
+};
+
+// Single declaration of the device constant used by all kernels
+// Defined exactly once in a rk45_kernel.cu file
+extern __constant__ DevParams rkDevParams;
+
+
 /**
  * GPU kernel that runs a single Dormand–Prince RK45 integrator on each thread.
  *
