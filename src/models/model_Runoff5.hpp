@@ -81,11 +81,11 @@ struct Runoff5
         // temperatures & runoff states are not projected
     }
 
-    // ---- my way to ensure non-negative states ----
+    // ensure non-negative states 
     __host__ __device__ static inline double ensure_non_negative(double x) {
         return (x < 1e-12 ? 0.0 : x);
     }
-    // -----------------------------------------------
+    
 
     __host__ __device__
     static void rhs(double t,
@@ -124,32 +124,34 @@ struct Runoff5
         double n_mann   = P.n_mann; // Manning's n coefficient [unitless]
         double slope    = P.slope; // average slope of hillslope [m/m]
         double L        = P.L;  // length of channel [m]
-        double A_i      = P.A_i;  // drainage area in [m²], don't need this parameter for runoff !!! remove it
+        double A_i      = P.A_i;  // drainage area in [m²], don't need this parameter for runoff 
         double A_h      = P.A_h; // area of hillslopes in [m²]
         double alpha3   = P.alpha3; // res_ss * 24.0 * 60.0; //days → minutes
         double alpha4   = P.alpha4; // res_gw * 24.0 * 60.0; //days → minutes
         double melt_f   = P.melt_f; // melt factor [m/day/°C] is what we passed to the model
         double temp_thr = P.temp_thr; // temperature threshold for snowmelt [°C]
 
+        // ── Parameter safety (avoid NaNs in algebra) ───────────────────────
+        const double slope_safe  = fmax(0.0, slope);
+        const double n_mann_safe = (n_mann > 0.0 ? n_mann : 1e12); // huge n → tiny 1/n
+        const double L_safe      = fmax(0.0, L);
+        const double A_h_safe    = fmax(1e-12, A_h);
+
         // ── 3) forcings  ─────────────────────────────────────────
-        //double c1         = 0.001/60.0;                   // mm/hr → m/min
+        //double c1         = 0.001/60.0;                   // mm/hr → m/min conversion factor
         double rainfall    = (nForc>0 ? F[0]*c1 : 0.0); // rainfall rate [m/min], convert from mm/hr to m/min
         double temperature = (nForc>1 ? F[1]    : 0.0);
         if (!finite_val(rainfall))    rainfall = 0.0; // only NaN/±Inf → 0
         if (!finite_val(temperature)) temperature = 0.0; // only NaN/±Inf → 0
-        // Apply rainfall threshold: ignore drizzle < 0.1 mm/hr
-        // constexpr double RAIN_THRESH_M_PER_MIN = 0.1 * 0.001 / 60.0; // 0.1 mm/hr → m/min
-        // if (rainfall < RAIN_THRESH_M_PER_MIN) rainfall = 0.0;
-
+        // derive day of year from time t (minutes since start of year)
         double doy        = 1.0 + t/1440.0;
 
         // ── 4) compute ET for static tank─────────────────────
         double pet    = HamonPET(temperature, lat, doy); // potential evapotranspiration [m/min]
         // double Emax   = fmin(pet, h_stat); // maximum possible evapotranspiration [m/min] from static tank, cannot be more than h1 [m]
-        double pet_clamped = fmax(0.0, pet); // !!! clamp PET to non-negative
+        double pet_clamped = fmax(0.0, pet); // clamp PET to non-negative
         double Emax = fmin(h_stat, fmax(0.0, pet_clamped));   // clamp PET, cap by storage
 
-        //double s_stat = h_stat/Hu; // relative soil moisture [unitless] !!!
         const double Hu_safe = fmax(1e-9, Hu);      // avoid divide-by-zero
         double s_stat = h_stat / Hu_safe;           // relative soil moisture [unitless]
         s_stat = fmin(1.0, fmax(0.0, s_stat));      // bound to [0,1]
@@ -198,10 +200,6 @@ struct Runoff5
             }
         }
 
-        // Disable snow completely:
-        // dydt[STATE_SNOW] = 0.0;
-        // double x1 = rainfall;  // all precip becomes immediate rainfall
-
         // ── 8) static tank ─────────────────────────────────────
         double x2 = fmax(0.0, x1 + h_stat - Hu); // water that enters second storage (surface) tank [m/min]
         if (frozen_ground) x2 = x1; // if frozen, all water goes to surface tank
@@ -218,10 +216,10 @@ struct Runoff5
 
         double x3        = fmin(x2, infil_eff); // water that infiltrates to gravitational storage [m/min]
         double d2        = x2 - x3; // input to surface tank [m/min]
-        double alfa2     = (1.0/n_mann) * pow(h_surf,2.0/3.0)*sqrt(slope);
+        double alfa2     = (1.0/n_mann_safe) * pow(h_surf,2.0/3.0)*sqrt(slope_safe);
         // double out2      = h_surf * fmin(1.0, alfa2*L/A_h*60.0);
         // Hardened outflow: limit to storage, check finite & non-negative
-        double out2 = h_surf * fmin(1.0, alfa2 * L / A_h * 60.0);
+        double out2 = h_surf * fmin(1.0, alfa2 * L_safe / A_h_safe * 60.0);
         out2 = fmin(out2, h_surf);
         if (!finite_val(out2) || out2 < 0.0) out2 = 0.0;
 
