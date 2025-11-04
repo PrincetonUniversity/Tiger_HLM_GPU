@@ -2,18 +2,61 @@
 #include <cmath>
 #include <cuda_runtime.h>
 #include "small_lu.cuh"    // for small_matrix_LU_solve
+#include "../I_O/forcing_data.h"
 
 static constexpr double SQRT6 = 2.449489742783178;
+
+/**
+ * Sample-and-hold forcings at time t using the same layout as RK45:
+ *   idx = forc_base[j] + k * num_systems + sys_id
+ * where k = floor((t - t0)/dt_cache[j]) clamped to [0, nT_cache[j]-1].
+*/
+__device__ __forceinline__
+void sample_forcings(double t,
+                     double t0,
+                     const size_t* __restrict__ forc_base,
+                     const double* __restrict__ dt_cache,
+                     const size_t* __restrict__ nT_cache,
+                     int num_systems,
+                     int sys_id,
+                     const float* __restrict__ d_forc_data,
+                     int nForc,
+                     float* __restrict__ Fout)
+{
+    #pragma unroll
+    for (int j = 0; j < nForc; ++j) {
+        const double s  = (t - t0) / dt_cache[j];
+        const size_t nS = nT_cache[j];
+        size_t k = (s < 0.0) ? 0 : (s >= (double)nS ? (nS - 1) : (size_t)s);
+        const size_t idx = forc_base[j] + k * (size_t)num_systems + (size_t)sys_id;
+        Fout[j] = d_forc_data[idx];
+    }
+}
+
 
 /**
  * If Model::jacobian isn't available, approximate ∂f/∂y by finite differences.
  */
 template<class Model>
-__device__ void approx_jacobian(double t, const double* y, double J[Model::N_EQ][Model::N_EQ], int sys_id, const typename Model::SP_TYPE* d_sp, 
-                                const float* d_forc_data, int nForc) {
+__device__ void approx_jacobian(double t,
+                                double const* __restrict__ y,
+                                double J[Model::N_EQ][Model::N_EQ],
+                                int sys_id,
+                                const typename Model::SP_TYPE* d_sp,
+                                const float* __restrict__ d_forc_data,
+                                int nForc,
+                                // sampling context (matches RK45)
+                                double t0,
+                                const size_t* __restrict__ forc_base,
+                                const double* __restrict__ dt_cache,
+                                const size_t* __restrict__ nT_cache,
+                                int num_systems)
+{
     constexpr int N = Model::N_EQ;
     double f0[N], f1[N];
-    Model::rhs(t, y, f0, N, sys_id, d_sp, d_forc_data, nForc);
+    float Fval0[MAX_FORCINGS];
+    sample_forcings(t, t0, forc_base, dt_cache, nT_cache, num_systems, sys_id, d_forc_data, nForc, Fval0);
+    Model::rhs(t, y, f0, N, sys_id, d_sp, Fval0, nForc);
     const double eps = sqrt(1e-16);
     for (int j = 0; j < N; ++j) {
         double yj = y[j];
@@ -21,7 +64,10 @@ __device__ void approx_jacobian(double t, const double* y, double J[Model::N_EQ]
         double ytmp[N];
         for (int i = 0; i < N; ++i) ytmp[i] = y[i];
         ytmp[j] += h_eps;
-        Model::rhs(t, ytmp, f1, N, sys_id, d_sp, d_forc_data, nForc);
+        float Fval1[MAX_FORCINGS];
+        sample_forcings(t, t0, forc_base, dt_cache, nT_cache, num_systems, sys_id, d_forc_data, nForc, Fval1);
+        Model::rhs(t, ytmp, f1, N, sys_id, d_sp, Fval1, nForc);
+
         for (int i = 0; i < N; ++i) {
             J[i][j] = (f1[i] - f0[i]) / h_eps;
         }
@@ -44,11 +90,17 @@ __device__ void radau_step(
     double        rtol,
     double        atol,
     double*       error_norm,
-    double        /*k_unused*/[7][Model::N_EQ],  // dummy
     int           sys_id,
     const typename Model::SP_TYPE* d_sp,
-    const float*  d_forc_data,  // forcing data
-    int           nForc         // number of forcings
+    const float*  d_forc_data,  // forcing slab (device)
+    int           nForc,         // number of forcings
+    /* OUT */ double Z_out[3][Model::N_EQ],  // stage increments for dense output
+    // sampling context (matches RK45)
+    double t0,
+    const size_t* __restrict__ forc_base,
+    const double* __restrict__ dt_cache,
+    const size_t* __restrict__ nT_cache,
+    int num_systems
 ) {
     constexpr int N = Model::N_EQ;
 
@@ -77,7 +129,9 @@ __device__ void radau_step(
     // Allocate and initialize stage increments Z[s][i]
     double Z[3][N];
     double f0[N];
-    Model::rhs(t, y, f0, N, sys_id, d_sp, d_forc_data, nForc);
+    float Fval_init[MAX_FORCINGS];
+    sample_forcings(t, t0, forc_base, dt_cache, nT_cache, num_systems, sys_id, d_forc_data, nForc, Fval_init);
+    Model::rhs(t, y, f0, N, sys_id, d_sp, Fval_init, nForc);
     for (int s = 0; s < 3; ++s)
         for (int i = 0; i < N; ++i)
             Z[s][i] = f0[i];
@@ -99,7 +153,8 @@ __device__ void radau_step(
             #ifdef HAS_MODEL_JACOBIAN
                 Model::jacobian(t + c[s]*h, Yi, J);
             #else
-                approx_jacobian<Model>(t + c[s]*h, Yi, J, sys_id, d_sp, d_forc_data, nForc);
+                approx_jacobian<Model>(t + c[s]*h, Yi, J, sys_id, d_sp, d_forc_data, nForc,
+                                       t0, forc_base, dt_cache, nT_cache, num_systems);
             #endif
 
             // Fill block row s of Mmat and rhs
@@ -118,7 +173,9 @@ __device__ void radau_step(
                 }
             }
             double fs[N];
-            Model::rhs(t + c[s]*h, Yi, fs, N, sys_id, d_sp,d_forc_data, nForc);
+            float Fval_stage[MAX_FORCINGS];
+            sample_forcings(t + c[s]*h, t0, forc_base, dt_cache, nT_cache, num_systems, sys_id, d_forc_data, nForc, Fval_stage);
+            Model::rhs(t + c[s]*h, Yi, fs, N, sys_id, d_sp, Fval_stage, nForc);
             for (int i = 0; i < N; ++i) {
                 rhs[s*N + i] = -Z[s][i] + fs[i];
             }
@@ -158,6 +215,12 @@ __device__ void radau_step(
         max_ratio = fmax(max_ratio, fabs(err_i / tol));
     }
     *error_norm = max_ratio;
+
+    // Return Z for dense output of this accepted step
+    for (int s = 0; s < 3; ++s)
+        for (int i = 0; i < N; ++i)
+            Z_out[s][i] = Z[s][i];
+
 }
 
 /**
