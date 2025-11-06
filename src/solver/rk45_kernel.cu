@@ -1,19 +1,19 @@
-// src/solver/rk45_kernel.cu
+// RK45-only kernel (fallbacks commented out) with detailed diagnostics.
+// All prints include sys and stream ID context.
 
 #include <cstdio>
 #include <cuda_runtime.h>
-#include <math.h>
+#include <math.h> 
 #include "rk45.h"
-#include "rk45_step_dense.cuh"
-#include "event_detector.cuh"
-#include "small_lu.cuh"
-#include "radau_step_dense.cuh"
+#include "rk45_step_dense.cuh" 
+#include "small_lu.cuh"        // for Radau fallback
 #include "../models/model_Runoff5.hpp"
 #include "../I_O/forcing_data.h"
+#include "radau_step_dense.cuh"   // enable Radau fallback inline
 #include <assert.h>
 
-#define STIFF_CODE_EARLY_TIMEOUT 66
-
+// Single definition of the shared solver parameters in constant memory
+__constant__ DevParams rkDevParams;
 
 // ───────────DEBUG BOUNDS MACRO ──────────────────────────────────────────────
 #ifndef DBG_ASSERT
@@ -29,213 +29,71 @@
 #endif
 // ────────────────────────────────────────────────────────────────────────────
 
-
+// ─────────── Logging throttle ───────────
+#ifndef RKDBG
+#define RKDBG 0   // set to 1 to re-enable chatty prints
+#endif
+#if RKDBG
+  #define DBG_PRINTF(...) printf(__VA_ARGS__)
+#else
+  #define DBG_PRINTF(...) ((void)0)
+#endif
+// Global managed counters to cap specific messages across the grid
+__device__ __managed__ int g_stiff_logs   = 0;
+__device__ __managed__ int g_reject_logs  = 0;
+__device__ __managed__ int g_jump_logs    = 0;
+__device__ __managed__ int g_nanlte_logs  = 0;
+__device__ __managed__ int g_nanstate_logs= 0;
+__device__ __managed__ int g_heartbeat    = 0;
 
 // ────────────────────────────────────────────────────────────────────────────
 // d_stiff status codes (per-system solver outcome)
 //
-//  0 : OK
-//      Integration finished normally on RK45 without triggering any special path.
-//
-//  1 : Stiff
-//      RK45 flagged stiffness (e.g., too many rejects or step collapsed) and
-//      bailed early. (In this version, Radau is handled out-of-kernel.)
-//
-//  2 : NaN LTE
-//      Local truncation error (LTE) estimate was non-finite (NaN/Inf).
-//
-//  3 : NaN state
-//      Proposed next state y_next contained a non-finite value (NaN/Inf).
-//
-//  5 : Fuse
-//      Iteration fuse tripped (e.g., exceeded max iterations or stalled progress).
-//
-//  6 : Fallback finished
-//      A fixed-step fallback integrator completed to tf. (Only used if fallback
-//      logic is enabled; otherwise this code will not appear.)
-//
-//  7 : Config error
-//      Configuration or bounds issue detected (e.g., nForc > MAX_FORCINGS).
-//
-// Notes:
-//  • d_stiff is written per system (index: sys) and read by the host for diagnostics.
-//  • 0 is the implicit “success” default when nothing sets an error/flag.
+//  0 : OK                  (normal RK45 finish)
+//  1 : Stiff               (reject-limit or min h hit; host may run Radau)
+//  2 : NaN LTE             (non-finite LTE estimate)
+//  3 : NaN state           (non-finite state proposal)
+//  5 : Fuse/timeout        (iteration/time-progress guard tripped)
+//  7 : Config error        (invalid forcing meta)
+// Notes: host inspects d_stiff[sys] after kernel.
 // ────────────────────────────────────────────────────────────────────────────
 
-// If you ever want to finish the remainder of the window with RK4 instead of
-// “burst then resume RK45”, flip this to true. Default: false (burst + resume).
-static constexpr bool FALLBACK_TO_TF = true; //!!
-
-
 // ────────────────────────────────────────────────────────────────────────────
-// Small helper: sample-and-hold forcings at time t for this system
-// (keeps semantics in SECONDS exactly as in the original kernel)
+/* Local fallbacks for helpers/thresholds that were defined in other headers
+   in the original build. Keeping them here makes this file self-contained.
+   If your project already defines them elsewhere, you can remove this block
+   and include that header instead. */
 // ────────────────────────────────────────────────────────────────────────────
-template <class Runoff5>
-__device__ inline void sample_forcings_SnH_seconds(
-    double t, double t0, int sys, int num_systems,
-    const size_t* __restrict__ forc_base,
-    const double* __restrict__ dt_sec_cache,
-    const size_t* __restrict__ nT_cache,
-    float* __restrict__ Fout, int nForc)
+#ifndef SLOPE_JUMP_THRESH
+// Heuristic threshold on ||k1 - k2||_inf indicating a sharp slope change.
+// Choose conservatively large by default; tune per model if needed.
+#define SLOPE_JUMP_THRESH 1e6
+#endif
+
+#ifndef MIN_STEP_FRACTION
+// Minimum fraction of the initial step allowed when cutting h due to
+// slope jumps. Very small floor avoids h→0 underflow in stiff regions.
+#define MIN_STEP_FRACTION 1e-6
+#endif
+
+// Infinity-norm difference helper for the slope-jump heuristic.
+__device__ __forceinline__ double norm_inf_diff(const double* __restrict__ a,
+                                                const double* __restrict__ b,
+                                                int n)
 {
-    extern __device__ float* d_forc_data;
-    for (int j = 0; j < nForc; ++j) {
-        const double dt_sec = dt_sec_cache[j];
-        const double s_real = (t - t0) / dt_sec;
-        const size_t nS     = nT_cache[j];
-        size_t sampleIdx = (s_real < 0.0) ? size_t(0)
-                            : (s_real >= double(nS)) ? (nS - 1)
-                            : size_t(s_real);
-        const size_t idx = forc_base[j] + sampleIdx * size_t(num_systems) + size_t(sys);
-        Fout[j] = d_forc_data[idx];
-    }
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Rosenbrock–W (ROS2, L-stable) implicit step (seconds)
-//  • 2 linearly-implicit stages, each solves (I - γ h J) k = rhs
-//  • No inner Newton; stable in stiff regions
-//  • Jacobian is built by finite differences (device-safe) to avoid model edits
-//  • Returns false on any numerical failure so caller can fall back/bail
-// ────────────────────────────────────────────────────────────────────────────
-template <class Runoff5>
-__device__ inline bool ros2w_step_seconds(
-    double& t, double* __restrict__ y, const int N_EQ,
-    double h, int sys, double t0, int num_systems,
-    const size_t* __restrict__ forc_base,
-    const double* __restrict__ dt_sec_cache,
-    const size_t* __restrict__ nT_cache,
-    const typename Runoff5::SP_TYPE* d_sp, int nForc)
-{
-    if (!(h > 0.0)) return false;
-    if (sys == 0){
-        printf("[ROS2W] sys=%d entering implicit ROS2W step at t=%.4f, h=%.2e\n", sys, t, h);
-    }
-
-    // Coefficients (ROS2-W; L-stable)
-    const double gamma = 1.0 - 1.0 / sqrt(2.0); // ≈ 0.292893218
-    const double a21 = 1.0;
-    const double c21 = -2.0 * gamma;
-    const double b1  = 0.5, b2 = 0.5;
-
-    // Scratch
-    float F0[MAX_FORCINGS], F1[MAX_FORCINGS];
-    double f0[Runoff5::N_EQ], f1[Runoff5::N_EQ];
-    double J[Runoff5::N_EQ * Runoff5::N_EQ];
-    double M[Runoff5::N_EQ * Runoff5::N_EQ];
-    double rhs[Runoff5::N_EQ];
-    double k1[Runoff5::N_EQ], k2[Runoff5::N_EQ];
-    double y_a[Runoff5::N_EQ], y_new[Runoff5::N_EQ];
-    double ytmp[Runoff5::N_EQ], ftmp[Runoff5::N_EQ];
-
-    // Forcings and RHS at (t, y)
-    sample_forcings_SnH_seconds<Runoff5>(t, t0, sys, num_systems,
-        forc_base, dt_sec_cache, nT_cache, F0, nForc);
-    Runoff5::rhs(t, y, f0, N_EQ, sys, d_sp, F0, nForc);
-
-    // Finite-difference Jacobian J = df/dy at (t,y)
-    // step size scaled to state magnitude and tolerances
-    for (int j = 0; j < N_EQ; ++j) {
-        for (int k = 0; k < N_EQ; ++k) ytmp[k] = y[k];
-        const double scale = 1.0 + fabs(y[j]);
-        const double eps = 1e-6 * scale;  // simple, robust choice on GPU
-        ytmp[j] += eps;
-        Runoff5::rhs(t, ytmp, ftmp, N_EQ, sys, d_sp, F0, nForc);
-        for (int i = 0; i < N_EQ; ++i) {
-            J[i * N_EQ + j] = (ftmp[i] - f0[i]) / eps;
-        }
-    }
-
-    // Build M = I - γ h J and solve for k1:  M k1 = f0
-    for (int i = 0; i < N_EQ; ++i) {
-        for (int j = 0; j < N_EQ; ++j) {
-            M[i * N_EQ + j] = (i == j ? 1.0 : 0.0) - gamma * h * J[i * N_EQ + j];
-        }
-    }
-    for (int i = 0; i < N_EQ; ++i) rhs[i] = f0[i];
-    small_matrix_LU_solve(N_EQ, M, rhs); // M is overwritten
-    for (int i = 0; i < N_EQ; ++i) k1[i] = rhs[i];
-
-    // Stage 2 state
-    for (int i = 0; i < N_EQ; ++i) y_a[i] = y[i] + a21 * k1[i];
-    Runoff5::project_nonnegative(y_a);
-
-    // RHS at (t+h, y_a)
-    sample_forcings_SnH_seconds<Runoff5>(t + h, t0, sys, num_systems,
-        forc_base, dt_sec_cache, nT_cache, F1, nForc);
-    Runoff5::rhs(t + h, y_a, f1, N_EQ, sys, d_sp, F1, nForc);
-
-    // Rebuild M (since LU destroyed it) and solve M k2 = f1 + (c21/h) k1
-    for (int i = 0; i < N_EQ; ++i)
-        for (int j = 0; j < N_EQ; ++j)
-            M[i * N_EQ + j] = (i == j ? 1.0 : 0.0) - gamma * h * J[i * N_EQ + j];
-    for (int i = 0; i < N_EQ; ++i) rhs[i] = f1[i] + (c21 / h) * k1[i];
-    small_matrix_LU_solve(N_EQ, M, rhs);
-    for (int i = 0; i < N_EQ; ++i) k2[i] = rhs[i];
-
-    // Combine
-    for (int i = 0; i < N_EQ; ++i) y_new[i] = y[i] + b1 * k1[i] + b2 * k2[i];
-    Runoff5::project_nonnegative(y_new);
-    for (int i = 0; i < N_EQ; ++i) {
-        if (!::isfinite(y_new[i])) return false;
-        y[i] = y_new[i];
-    }
-    t += h;
-    return true;
-}
-
-
-// ────────────────────────────────────────────────────────────────────────────
-template <class Runoff5>
-__device__ inline void rk4_fixed_step_seconds(
-    double& t, double* __restrict__ y, const int N_EQ,
-    double h, int sys, double t0, int num_systems,
-    const size_t* __restrict__ forc_base,
-    const double* __restrict__ dt_sec_cache,
-    const size_t* __restrict__ nT_cache,
-    const typename Runoff5::SP_TYPE* d_sp, int nForc)
-{
-    float F0[MAX_FORCINGS], Fm[MAX_FORCINGS], F1[MAX_FORCINGS];
-    double k1[Runoff5::N_EQ], k2[Runoff5::N_EQ], k3[Runoff5::N_EQ], k4[Runoff5::N_EQ], yt[Runoff5::N_EQ];
-
-    sample_forcings_SnH_seconds<Runoff5>(t,          t0, sys, num_systems, forc_base, dt_sec_cache, nT_cache, F0, nForc);
-    Runoff5::rhs(t, y, k1, N_EQ, sys, d_sp, F0, nForc);
-
-    for (int i=0;i<N_EQ;++i) yt[i] = y[i] + 0.5*h*k1[i];
-    Runoff5::project_nonnegative(yt);
-    sample_forcings_SnH_seconds<Runoff5>(t + 0.5*h, t0, sys, num_systems, forc_base, dt_sec_cache, nT_cache, Fm, nForc);
-    Runoff5::rhs(t + 0.5*h, yt, k2, N_EQ, sys, d_sp, Fm, nForc);
-
-    for (int i=0;i<N_EQ;++i) yt[i] = y[i] + 0.5*h*k2[i];
-    Runoff5::project_nonnegative(yt);
-    Runoff5::rhs(t + 0.5*h, yt, k3, N_EQ, sys, d_sp, Fm, nForc);
-
-    for (int i=0;i<N_EQ;++i) yt[i] = y[i] + h*k3[i];
-    Runoff5::project_nonnegative(yt);
-    sample_forcings_SnH_seconds<Runoff5>(t + h,     t0, sys, num_systems, forc_base, dt_sec_cache, nT_cache, F1, nForc);
-    Runoff5::rhs(t + h, yt, k4, N_EQ, sys, d_sp, F1, nForc);
-
-    for (int i=0;i<N_EQ;++i)
-        y[i] += (h/6.0)*(k1[i] + 2.0*k2[i] + 2.0*k3[i] + k4[i]);
-    Runoff5::project_nonnegative(y);
-    t += h;
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Helpers to write consistent outputs on early exit
-// ────────────────────────────────────────────────────────────────────────────
-template<int N_EQ>
-__device__ inline void write_final_zero(int sys, double* __restrict__ y_final_all) {
+    double m = 0.0;
     #pragma unroll
-    for (int i = 0; i < N_EQ; ++i)
-        y_final_all[sys * N_EQ + i] = 0.0;
+    for (int i = 0; i < n; ++i) {
+        double d = fabs(a[i] - b[i]);
+        if (d > m) m = d;
+    }
+    return m;
 }
 
 
 // ────────────────────────────────────────────────────────────────────────────
-// Single‐kernel that does RK45 and flags stiffness, but no in‐kernel Radau.
-// (Base: original code. Added constraints below without changing sec/min logic.)
+// Single‐kernel that does RK45 and flags stiffness. All in-kernel fallback
+// (ROS2W / Radau / “pdf” fallback) is removed/commented out.
 // ────────────────────────────────────────────────────────────────────────────
 template <class Runoff5>
 __global__ void rk45_then_radau_multi(
@@ -245,790 +103,456 @@ __global__ void rk45_then_radau_multi(
     float*  dense_all,    // [num_systems × num_queries × N_EQ]
     int     num_systems,  // number of systems to solve
     int     num_queries,  // number of queries to answer
-    double  t0,           // initial time (seconds)
-    double  tf,           // final time   (seconds)
+    double  t0,           // initial time (same units as c_forc_dt entries)
+    double  tf,           // final time
     const typename Runoff5::SP_TYPE* d_sp, // per-system parameters
-    int*    d_stiff,       // [num_systems] stiffness flags
-    const long* stream_ids // [num_systems] stream identifiers 
+    int*    d_stiff,      // [num_systems] status codes
+    const long* stream_ids// [num_systems] for diagnostics
 ) {
-    // Re-declare device symbols (defined elsewhere)
+    // Device-side forcing descriptors (defined elsewhere in CU/CUH)
     extern __device__   float*   d_forc_data;   // flattened forcing values
-    extern __constant__ double   c_forc_dt[];   // forcing cadence in MINUTES
+    extern __constant__ double   c_forc_dt[];   // forcing cadence (same units used by original code)
     extern __constant__ size_t   c_forc_nT[];   // number of time samples per forcing
     extern __constant__ int      nForc;         // number of distinct forcings
 
     constexpr int N_EQ = Runoff5::N_EQ;
     const int sys = blockIdx.x * blockDim.x + threadIdx.x;
+    if (sys >= num_systems) return;
 
-    bool used_ros2w = false;
-    bool finished_by_fallback = false;
-
-    __shared__ int stiff_kill_count;
-    if (threadIdx.x == 0) stiff_kill_count = 0;
-    __syncthreads();
-
-
-    // (keep original limits in SECONDS)
-    const int    REJECT_LIMIT = 20;     // was 5
-    const double H_MIN_ABS    = 1e-7;  // seconds; tiny absolute floor (unchanged)
-
-    // int sys = blockIdx.x * blockDim.x + threadIdx.x;
-    if (sys >= num_systems) return;  // safety check
-    assert(sys < num_systems);       // detect out-of-bounds early
-
-
-    // if (sys >= num_systems) return;
-
-    // Safety: ensure global pointer to forcing slab is valid
+    // Safety: ensure forcing slab pointer is valid
     if (!d_forc_data) {
         if (sys == 0) {
-            printf("[KERNEL] d_forc_data is null; skipping computation.\n");
+            printf("[KERNEL] d_forc_data is null; sys=%d streamID=%ld — skipping.\n",
+                   sys, stream_ids[sys]);
         }
         return;
     }
 
-    // Validate forcing count early (constraint)
+    // Validate forcing count
     if (nForc <= 0 || nForc > MAX_FORCINGS) {
-        if (sys == 0) printf("[KERNEL] Invalid nForc=%d\n", nForc);
-        d_stiff[sys] = 7; // Config error
+        if (sys == 0) {
+            printf("[KERNEL] Invalid nForc=%d; sys=%d streamID=%ld\n",
+                   nForc, sys, stream_ids[sys]);
+        }
+        d_stiff[sys] = 7;
         return;
     }
 
-    // Solver parameters from constant/dev memory
-    const double rtol = devParams.rtol;
-    const double atol = devParams.atol;
+    // Solver params from constant/dev memory
+    const double rtol = rkDevParams.rtol;
+    const double atol = rkDevParams.atol;
 
-    // ────────────────────────
-    // Per-thread scratch state
-    // ────────────────────────
-    double y[N_EQ], y_next[N_EQ], k45[7][N_EQ], err;
-    for (int i = 0; i < N_EQ; ++i) y[i] = y0_all[sys * N_EQ + i];
+    // Controller / guards constants
+    const int    REJECT_LIMIT = 20;      // fine
+    const double EPS          = 1e-10;   // ok
+    const double H_MIN        = 1e-8;    // raise from 1e-12
+    const double H_MIN_ABS    = 1e-7;    // ~10× H_MIN
 
-    int  next_q = 0, reject_count = 0;
-    bool stiff  = false;
 
-    // ─────────────────────────────────────────────────────────
-    // Precompute per-forcing base offsets into d_forc_data once
-    // Layout: [forc0: nT0 × num_systems] [forc1: nT1 × num_systems] ...
-    // Index = base[j] + sampleIdx * num_systems + sys
-    // ─────────────────────────────────────────────────────────
+    // Per-thread state
+    double y[N_EQ], y_next[N_EQ], k45[7][N_EQ];
+    double err = 0.0;
+
+    for (int i = 0; i < N_EQ; ++i)
+        y[i] = y0_all[sys * N_EQ + i];
+
+    int  next_q = 0;
+    int  reject_count = 0;
+    bool stiff = false;
+
+    // Time integration window 
+    double t = t0;
+    double h = rkDevParams.initialStep;
+    if (h < H_MIN) h = H_MIN;
+
+    // Precompute base offsets for each forcing slab and cache meta
     size_t forc_base[MAX_FORCINGS];
+    double dt_cache[MAX_FORCINGS];   // same units as c_forc_dt
+    size_t nT_cache[MAX_FORCINGS];
     {
         size_t acc = 0;
         for (int j = 0; j < nForc; ++j) {
             forc_base[j] = acc;
             acc += c_forc_nT[j] * size_t(num_systems);
-        }
-    }
-
-    // (Optional but cheap) Cache dt_sec and nT locally to reduce constant-memory traffic
-    // IMPORTANT: Do not change minute/second handling from original!
-    double dt_sec_cache[MAX_FORCINGS]; // forcing cadences in SECONDS (same naming as original)
-    size_t nT_cache[MAX_FORCINGS];
-    for (int j = 0; j < nForc; ++j) {
-        dt_sec_cache[j] = c_forc_dt[j]*60; // original kept as-is; do NOT modify units here
-        nT_cache[j]     = c_forc_nT[j];
-        if (!(dt_sec_cache[j] > 0.0) || nT_cache[j] == 0) {
-            if (sys == 0) {
-                printf("[KERNEL] invalid forcing meta: j=%d dt=%.6g nT=%zu\n",
-                       j, dt_sec_cache[j], nT_cache[j]);
+            dt_cache[j] = c_forc_dt[j];
+            nT_cache[j] = c_forc_nT[j];
+            if (!(dt_cache[j] > 0.0) || nT_cache[j] == 0) {
+                if (sys == 0) {
+                    printf("[KERNEL] invalid forcing meta: j=%d dt=%.6g nT=%zu  sys=%d streamID=%ld\n",
+                           j, dt_cache[j], nT_cache[j], sys, stream_ids[sys]);
+                }
+                d_stiff[sys] = 7;
+                return;
             }
-            d_stiff[sys] = 7; // Config error
-            return;
         }
     }
 
-    // ──────────────────────────────────────────────
-    // RK45 integration over [t0, tf] with event caps
-    // ──────────────────────────────────────────────
-    double t = t0;
+    // ───── Progress guards ─────
+    // cache the smallest forcing cadence (in minutes) for adaptive thresholds
+    double dt_min = 1e300;
+    for (int j = 0; j < nForc; ++j) dt_min = fmin(dt_min, dt_cache[j]);
+    if (!(dt_min > 0.0) || !isfinite(dt_min)) dt_min = 60.0;  // sane fallback (1 hr)
 
-    // If initialStep==0, let the controller grow but keep a tiny floor to avoid underflow.
-    double h = devParams.initialStep;
-    const double H_MIN = 1e-12; // seconds; tiny, just avoids 0 *anything = 0 traps
-    if (h < H_MIN) h = H_MIN;
+    // If time advances less than eps_t for many iterations, flag stiffness.
+    const double eps_t = fmax(1e-4 /* minutes ≈ 0.006 s */, 1e-6 * dt_min);
+    long long no_prog_iters = 0;
+    double t_prev = t;   // t now exists
 
-    // EPS for boundary comparisons to avoid FP “just negative” remainders
-    const double EPS = 1e-12;
+    // If accepted h is persistently tiny relative to forcing cadence, flag stiffness.
+    const double tiny_h_thresh = 1e-6 * dt_min;
+    int tiny_h_accepted = 0;
+    const int TINY_H_LIMIT = 2000;   // ~2k accepted micro-steps ⇒ stiff  
 
-    // ── Stall fuse bookkeeping (constraint)
-    double last_t_progress = t;
-    const double T_PROG_EPS = 1e-12;  // in SECONDS: require strict increase to count as progress
-    int    stall_iters = 0;
-    // const int STALL_LIMIT = 5000;     // much tighter fuse
 
-    // Cap how many consecutive slope-jump halvings we allow at the same t
-    int jump_halves = 0;
-    
-    // ── Tiny-h accepted-steps fuse bookkeeping (fires even if err<=1)
-    int    tiny_h_iters       = 0;
-    const int    TINY_H_LIMIT = 150000;    // tunable: #iters with tiny h before bursting
-    const double H_TINY_THRESHOLD = 1e-5;  // seconds; consider h "tiny" below this
+    // Global loop guard to avoid GPU hangs
+    long long iter = 0;
+    const long long MAX_ITERS = 500000000LL; // 5e8; tune as needed
 
-    // // Global loop-iteration fuse (constraint)
-    // int total_iters = 0;
-    // const int MAX_TOTAL_ITERS = 100000;
-    // ────────────────────────────────────────────────────────────────────────────────
-    // SMART FUSE UPGRADE  (Approach 1 + 2)
-    // -------------------------------------------------------------------------------
-    //  • Budget iterations based on the smallest forcing cadence (dt_sec)
-    //    → avoids false timeouts for long windows with many tiny steps.
-    //  • Keep a stall fuse that fires only when time stops advancing
-    //    → catches true infinite-loop conditions without penalizing progress.
-    // -------------------------------------------------------------------------------
-    long long total_iters = 0;                                         // ★ 64-bit counter
-
-    // Find smallest forcing cadence (seconds)
-    double min_dt = 1e300;
-    for (int j = 0; j < nForc; ++j) min_dt = fmin(min_dt, dt_sec_cache[j]);  // ★
-    // --- PATCH: Allow solver to shrink below 1 hour if needed to prevent timeouts
-    if (min_dt > 60.0) {
-        min_dt = 60.0;
+    if (sys == 0) {
+        DBG_PRINTF("[SOLVER-START] sys=%d streamID=%ld t0=%.9f tf=%.9f init_h=%.3e rtol=%.1e atol=%.1e\n",
+            sys, stream_ids[sys], t0, tf, h, rtol, atol);
+               
+        // ───── Debug: Verify constant-memory DevParams ─────
+        DBG_PRINTF("[DevParams] rtol=%.3e atol=%.2e safety=%.2f minScale=%.2f maxScale=%.2f h0=%.3e\n",
+               rkDevParams.rtol,
+               rkDevParams.atol,
+               rkDevParams.safety,
+               rkDevParams.minScale,
+               rkDevParams.maxScale,
+               rkDevParams.initialStep);
     }
 
-    // Estimate number of forcing "slabs" in this window
-    const double window = fmax(tf - t0, 0.0);
-    const long long n_slabs = (long long)ceil(window / fmax(min_dt, 1e-30)); // ★
+    while (t < tf && !stiff && iter < MAX_ITERS) {
+        // Track whether this step has been clamped to a forcing boundary.
+        // If true, the slope-jump heuristic is disabled because the RHS is
+        // discontinuous and k1/k2 difference will be huge but expected.
+        bool at_forcing_boundary = false;
 
-    // Allow up to this many RK steps per forcing slab (tunable)
-    // const long long STEPS_PER_SLAB_BUDGET = 4096;                       // ★
-    const long long STEPS_PER_SLAB_BUDGET = 262144; //131072;  // 128k per forcing slab
-
-    // // Compute data-dependent iteration budget with generous global cap
-    // const long long MAX_TOTAL_ITERS =
-    //     llmin((long long)5e8,
-    //           llmax((long long)1e6, n_slabs * STEPS_PER_SLAB_BUDGET));   // ★
-
-    // Compute data-dependent iteration budget with generous global cap (no llmin/llmax)  // ★
-    long long tmp_iters = (long long)(n_slabs * STEPS_PER_SLAB_BUDGET);                                               // ★
-    // if (tmp_iters < 1000000LL)   tmp_iters = 1000000LL;   // floor at 1e6     
-    if (tmp_iters < 5000000LL)   tmp_iters = 5000000LL;   // floor at 5e6                                  // ★
-    if (tmp_iters > 500000000LL) tmp_iters = 500000000LL; // cap at 5e8                                         // ★
-    const long long MAX_TOTAL_ITERS = tmp_iters; 
-
-    // Progress-based stall fuse
-    const int HARD_STALL_LIMIT = 200000;   // ★ only fires on true spin
-
-
-    while (t < tf && !stiff && total_iters < MAX_TOTAL_ITERS) {
-        // Early bailout for systems stuck at t ≈ 0, h ≈ 0, iters > huge
-        const long long MAX_EARLY_STALL_ITERS = 1000000000LL;  // 1e9
-        if (t < 1e-8 && h <= 1e-12 && total_iters > MAX_EARLY_STALL_ITERS) {
-            for (int i = 0; i < N_EQ; ++i) {
-                y_final_all[sys * N_EQ + i] = 0.0f;
+        ++iter;
+        if ((iter % 5000000LL) == 0 && sys == 0) {
+            if (atomicAdd(&g_heartbeat, 1) < 10) {
+                DBG_PRINTF("[HEARTBEAT] sys=%d streamID=%ld iter=%lld t=%.9f h=%.3e last_err=%.3e\n",
+                           sys, stream_ids[sys], (long long)iter, t, h, err);
             }
-            d_stiff[sys] = STIFF_CODE_EARLY_TIMEOUT;  // special code: early stall at t≈0
-            atomicAdd(&stiff_kill_count, 1);
-            if (sys % 100000 == 0)
-                printf("[EARLY-STIFF] sys=%d stuck at t=%.3e h=%.1e → exiting early\n", sys, t, h);
-            return;
         }
 
-        ++total_iters;
+        // ── Stall heartbeat ───────────────────────────────────────────────────────────
+        // Prints every 10 million iterations per thread to confirm progress.
+        // Helpful for diagnosing GPU stalls or extremely stiff systems.
+        if ((iter % 10000000LL) == 0) {
+            printf("[STALL-CHECK] sys=%d streamID=%ld still alive at t=%.9f h=%.3e\n",
+                sys, stream_ids[sys], t, h);
+        }
+        // ──────────────────────────────────────────────────────────────────────────────
+
+
 
         // Never step past tf
         if (t + h > tf) h = tf - t;
 
-        // Near-final-time escape to prevent end-of-window bounce/stall (constraint)
-        const double rem_tf = tf - t;       // seconds remaining
-        const double REM_EPS = 1e-15;       // seconds
-        if (rem_tf <= REM_EPS) {
-            break; // effectively at tf
-        }
-        if (h > rem_tf) h = rem_tf;
-
-        // ────────────────────────────────────────────────────────────────
-        // Do not step across any forcing boundary (piecewise-constant RHS)
-        // For each forcing j with cadence dt_sec[j], compute the next
-        // change time t_next ≥ t, then cap h to the smallest positive gap.
-        // (Keep original seconds-based logic; add snap-on-boundary constraint.)
-        // ────────────────────────────────────────────────────────────────
+        // Do not cross forcing boundaries (piecewise-constant RHS)
         {
-            const double INF = 1e300;
-            double h_forc = INF;
-
+            double h_forc = 1e300;
             for (int j = 0; j < nForc; ++j) {
-                const double dt_sec = dt_sec_cache[j];
-                const double s      = (t - t0) / dt_sec;             // fractional sample index since epoch t0
-                const double t_next = (floor(s) + 1.0) * dt_sec + t0; // time of next boundary for forcing j
-                const double rem    = t_next - t;                     // gap until that boundary
-                if (rem > EPS) {                                      // strictly in the future
-                    h_forc = fmin(h_forc, rem);
-                }
+                const double dtj    = dt_cache[j];
+                const double s      = (t - t0) / dtj;
+                const double t_next = (floor(s) + 1.0) * dtj + t0;
+                const double rem    = t_next - t;
+                if (rem > EPS) h_forc = fmin(h_forc, rem);
             }
-            if (h_forc < INF) {
-                // If we are essentially on the boundary, snap and continue (seconds)
-                // const double BOUNDARY_SNAP_EPS_S = 3.6e-3; // ≈ 0.0036 s (tight but nonzero)
-                const double BOUNDARY_SNAP_EPS_S = 1e-3 * min_dt; // 3.6 s for 1-hour cadence
-                if (h_forc <= BOUNDARY_SNAP_EPS_S) {
-                    t += h_forc;
-                    Runoff5::project_nonnegative(y);
-                    // Emit any queries now ≤ t
-                    while (next_q < num_queries && query_times[next_q] <= t + EPS) {
-                        const long long flat_q = ((long long)sys * (long long)num_queries + (long long)next_q);
-                        DBG_ASSERT(next_q >= 0 && next_q < num_queries, "next_q OOB %d/%d", next_q, num_queries);
-                        DBG_ASSERT(flat_q >= 0 &&
-                                   flat_q < (long long)num_systems * (long long)num_queries,
-                                   "dense idx OOB: flat_q=%lld ns*nq=%lld",
-                                   flat_q, (long long)num_systems * (long long)num_queries);
-                        const long long base_idx = flat_q * N_EQ;
-                        double y_clamped[N_EQ];
-                        for (int c = 0; c < N_EQ; ++c) y_clamped[c] = y[c];
-                        Runoff5::project_nonnegative(y_clamped);
-                        for (int c = 0; c < N_EQ; ++c) dense_all[base_idx + c] = static_cast<float>(y_clamped[c]);
-                        ++next_q;
-                    }
-                    reject_count = 0; // safe to clear when we land on a boundary
-                    continue; // start a fresh step from the boundary
+            if (h_forc < 1e300) {
+                // if (h > h_forc) h = h_forc;
+                // // reject_count reset across discontinuities (original behavior)
+                // reject_count = 0;
+                if (h > h_forc) {
+                    h = h_forc;              // land *exactly* on forcing change
+                    reject_count = 0;        // allow clean step acceptance
+                    at_forcing_boundary = true;
                 }
-                // Otherwise cap h to stay within the current forcing slab
-                if (h > h_forc) h = h_forc;
-
-                // IMPORTANT: don’t carry reject penalties across a discontinuity (original behavior kept)
-                reject_count = 0;
             }
         }
 
-         // ────────────────────────────────────────────────────────────────
-         // Tiny-h fuse: if h stays microscopic for a long time (even on accepts),
-         // force a short RK4 burst to jump out of the stall region, or mark stiff.
-         // ────────────────────────────────────────────────────────────────
-         if (h < H_TINY_THRESHOLD) {
-             if (++tiny_h_iters > TINY_H_LIMIT) {
-                 // Scale burst to forcing cadence so it actually moves
-                 const double HFIX     = fmin(0.001 * min_dt, 30.0);   // ≤0.1% cadence, ≤30 s
-                 const double MIN_ADV  = fmin(0.02  * min_dt, 120.0);  // 2% cadence, ≤2 min
-                 const int    NFIX_MAX = 500;
- 
-                 double t_start = t;
-                 int steps = 0;
-                 while (t < tf && (t - t_start) + 1e-12 < MIN_ADV && steps < NFIX_MAX) {
-                     double gap_local = 1e300;
-                     for (int j = 0; j < nForc; ++j) {
-                         const double ss     = (t - t0) / dt_sec_cache[j];
-                         const double t_next = (floor(ss) + 1.0) * dt_sec_cache[j] + t0;
-                         const double g      = t_next - t;
-                         if (g > 0.0 && g < gap_local) gap_local = g;
-                     }
-                     double hs = (gap_local < HFIX ? gap_local : HFIX);
-                     if (hs <= 0.0) break;
- 
-                    //  rk4_fixed_step_seconds<Runoff5>(
-                    //      t, y, N_EQ, hs, sys, t0, num_systems,
-                    //      forc_base, dt_sec_cache, nT_cache, d_sp, nForc);
-    if (!used_ros2w && sys == 0)
-        printf("[SOLVER] sys=%d switching to ROS2W (tiny-h fallback) at t=%.4f\n", sys, t);
-    used_ros2w = true;
-
-                        if (!ros2w_step_seconds<Runoff5>(
-                                t, y, N_EQ, hs, sys, t0, num_systems,
-                                forc_base, dt_sec_cache, nT_cache, d_sp, nForc)) {
-                            hs *= 0.5;
-                            if (hs <= 0.0 || !ros2w_step_seconds<Runoff5>(
-                                    t, y, N_EQ, hs, sys, t0, num_systems,
-                                    forc_base, dt_sec_cache, nT_cache, d_sp, nForc)) {
-                                stiff = true;
-                                break;
-                            }
-                        }
-                     ++steps;
- 
-                     // Emit any queries we passed (no interpolation inside micro-step)
-                     while (next_q < num_queries && query_times[next_q] <= t + EPS) {
-                         const long long flat_q = ((long long)sys * (long long)num_queries + (long long)next_q);
-                         DBG_ASSERT(next_q >= 0 && next_q < num_queries, "next_q OOB %d/%d", next_q, num_queries);
-                         const long long base_idx = flat_q * N_EQ;
-                         double y_clamped[N_EQ];
-                         for (int c = 0; c < N_EQ; ++c) y_clamped[c] = y[c];
-                         Runoff5::project_nonnegative(y_clamped);
-                         for (int c = 0; c < N_EQ; ++c) dense_all[base_idx + c] = (float)y_clamped[c];
-                         ++next_q;
-                     }
-                 }
- 
-                 if (t - t_start >= 1e-7) {
-                     // We advanced → resume RK45 with a sane step and reset counters
-                     h = fmax(0.02, devParams.initialStep); // ~0.02 s
-                     reject_count = 0;
-                     stall_iters  = 0;
-                     tiny_h_iters = 0;
-                     continue; // restart loop from (t,y)
-                 } else {
-                     // Couldn’t move even with burst → bail to stiff and let host handle fallback
-                     Runoff5::project_nonnegative(y);
-                     for (int i = 0; i < N_EQ; ++i) y_final_all[sys * N_EQ + i] = y[i];
-                     d_stiff[sys] = 1; // stiff
-                     printf("[STIFF-FLAG] sys=%d stiff=%d (tiny-h crawl)\n", sys, d_stiff[sys]);
-                     return;
-                 }
-             }
-         } else {
-             tiny_h_iters = 0; // reset when h isn’t tiny
-         }
-
-        // ────────────────────────────────────────────────────────────────
-        // Gather forcings at current time t (sample-and-hold semantics)
-        // (seconds, identical to original semantics; add NaN guard constraint)
-        // ────────────────────────────────────────────────────────────────
+        // Gather forcings (sample-and-hold)
         float Fval_arr[MAX_FORCINGS];
         for (int j = 0; j < nForc; ++j) {
-            const double dt_sec  = dt_sec_cache[j];
-            const double s_real  = (t - t0) / dt_sec;   // fractional index
-            const size_t nS      = nT_cache[j];
-            // Clamp to valid sample range [0, nS-1]
+            const double dtj   = dt_cache[j];
+            const double s_real= (t - t0) / dtj;
+            const size_t nS    = nT_cache[j];
             size_t sampleIdx = (s_real < 0.0) ? size_t(0)
                                 : (s_real >= double(nS)) ? (nS - 1)
-                                : size_t(s_real); // truncates toward zero = floor for s_real >= 0
-
+                                : size_t(s_real);
             const size_t idx = forc_base[j] + sampleIdx * size_t(num_systems) + size_t(sys);
             Fval_arr[j] = d_forc_data[idx];
-        }
-        for (int j = 0; j < nForc; ++j) {
             if (!::isfinite(Fval_arr[j])) {
-                d_stiff[sys] = 7; // config error
-                printf("[FORCING-NAN] sys=%d forc=%d val=%f at t=%.9f\n",
-                       sys, j, Fval_arr[j], t);
+            if (atomicAdd(&g_nanlte_logs, 1) < 50) {
+                printf("[FORCING-NAN] sys=%d streamID=%ld j=%d val=%f t=%.9f\n",
+                       sys, stream_ids[sys], j, Fval_arr[j], t);
+            }
+                d_stiff[sys] = 7;
                 return;
             }
         }
 
-        // RHS at stage 0 (k1) with current forcings
+        // Stage-0 slope
         Runoff5::rhs(t, y, k45[0], N_EQ, sys, d_sp, Fval_arr, nForc);
 
-        // One adaptive RK45 step attempt (fills y_next, k45, err)
+        // Attempt one RK45 step (fills y_next, k45, err)
         rk45_step<Runoff5>(t, y, y_next, N_EQ, h, rtol, atol, &err,
                            k45, sys, d_sp, Fval_arr, nForc);
 
-        // Add this right after the rk45_step call
-        // if (total_iters > MAX_TOTAL_ITERS || isnan(h)) {
-        //     d_stiff[sys] = 5;
-        //     printf("[TIMEOUT] sys=%d streamID=%ld t=%.6f h=%.3e iters=%lld\n",
-        //         sys, stream_ids[sys], t, h, total_iters);
-        //     return;
-        // }
-        // Timeout → zero outputs for this system, flag, fence, and return
-        if (total_iters > MAX_TOTAL_ITERS || isnan(h)) {
-            write_final_zero<N_EQ>(sys, y_final_all);
-            d_stiff[sys] = 5;
-            __threadfence();
-            printf("[TIMEOUT] sys=%d streamID=%ld t=%.6f h=%.3e iters=%lld\n",
-                sys, stream_ids[sys], t, h, total_iters);
-            return;
-        }
-
-        // [A] ──NaN/Inf checks (constraint)
+        // Check for NaN LTE estimate
         if (!::isfinite(err)) {
-            Runoff5::project_nonnegative(y);
-            for (int i=0;i<N_EQ;++i) y_final_all[sys*N_EQ+i] = y[i];
-            d_stiff[sys] = 2; // NaN LTE
-            printf("[STIFF-FLAG] sys=%d stiff=%d (NaN LTE)\n", sys, d_stiff[sys]);
-            return;
+            if (atomicAdd(&g_nanlte_logs, 1) < 50) {
+                printf("[NaN-LTE] sys=%d streamID=%ld t=%.9f h=%.3e\n", sys, stream_ids[sys], t, h);
+            }
+            stiff = true;           // force implicit fallback
+            // shrink h and continue; Radau block will handle the step
+            h = fmax(0.5 * h, H_MIN);
+            continue;
         }
-        // runaway error guard (prevents super-long reject loops)
-        if (err > 1e50) {
-            stiff = true;
-            break;
-        }
-        for (int c=0;c<N_EQ;++c) {
+        // Check for NaN in proposed state
+        for (int c = 0; c < N_EQ; ++c) {
             if (!::isfinite(y_next[c])) {
                 Runoff5::project_nonnegative(y);
-                for (int i=0;i<N_EQ;++i) y_final_all[sys*N_EQ+i] = y[i];
+                for (int i = 0; i < N_EQ; ++i) y_final_all[sys * N_EQ + i] = y[i];
                 d_stiff[sys] = 3; // NaN state
-                printf("[STIFF-FLAG] sys=%d stiff=%d (NaN state)\n", sys, d_stiff[sys]);
+                // printf("[NaN-STATE] sys=%d streamID=%ld comp=%d t=%.9f h=%.3e\n",
+                //        sys, stream_ids[sys], c, t, h);
+                if (atomicAdd(&g_nanstate_logs, 1) < 50) {
+                    printf("[NaN-STATE] sys=%d streamID=%ld comp=%d t=%.9f h=%.3e\n",
+                           sys, stream_ids[sys], c, t, h);
+                }
                 return;
             }
-        }
-
-        // ---- Stall fuse: detect lack of time progress over many iterations (constraint)
-        // if (t > last_t_progress + T_PROG_EPS) {
-        //     last_t_progress = t;
-        //     stall_iters = 0;
-        // } else {
-        //     if (++stall_iters > STALL_LIMIT) {
-        //         Runoff5::project_nonnegative(y);
-        //         for (int i = 0; i < N_EQ; ++i) {
-        //             y_final_all[sys * N_EQ + i] = y[i];
-        //         }
-        //         d_stiff[sys] = 5; // Fuse: exceeded stall iteration limit
-        //         printf("[STIFF-FLAG] sys=%d code=5 (stall) t=%.15g h=%.15g iters=%d\n",
-        //                sys, t, h, stall_iters);
-        //         return;
-        //     }
-        // }
-
-        // ★ Stall fuse now tied to *lack of progress* instead of iteration count.
-        if (t > last_t_progress + T_PROG_EPS) {
-            last_t_progress = t;
-            stall_iters = 0;
-         } else if (++stall_iters > HARD_STALL_LIMIT) {
-            Runoff5::project_nonnegative(y);
-            // for (int i = 0; i < N_EQ; ++i)
-            //     y_final_all[sys * N_EQ + i] = y[i];
-            // d_stiff[sys] = 5;
-            // printf("[TIMEOUT] sys=%d streamID=%ld stall_iters=%d t=%.9f h=%.3e\n",
-            //        sys,stream_ids[sys],stall_iters, t, h);
-            // Hard stall → zero outputs, flag, fence, and return
-            write_final_zero<N_EQ>(sys, y_final_all);
-            d_stiff[sys] = 5;
-            __threadfence();
-            printf("[TIMEOUT] sys=%d streamID=%ld stall_iters=%d t=%.9f h=%.3e\n",
-                sys,stream_ids[sys],stall_iters, t, h);
-            return;
         }
 
         if (err <= 1.0) {
             // ───────────── Accepted step ─────────────
             reject_count = 0;
-            jump_halves  = 0;
 
-            // Slope-jump heuristic (constraint)
+            // Slope-jump heuristic: disable at forcing boundaries
             const double jump = norm_inf_diff(k45[0], k45[1], N_EQ);
-            if (jump > SLOPE_JUMP_THRESH) {
-                ++jump_halves;
-                h = fmax(0.5 * h, devParams.initialStep * MIN_STEP_FRACTION);
+            if (!at_forcing_boundary && jump > SLOPE_JUMP_THRESH) {
+                double h_prev = h;
+                h = fmax(0.5 * h, rkDevParams.initialStep * MIN_STEP_FRACTION);
                 if (h < H_MIN) h = H_MIN;
-                if (jump_halves > 8 || h < H_MIN_ABS) { stiff = true; break; }
-                ++reject_count; // treat as controlled reject to allow bail if pathological
-                continue; // retry from same t with smaller h
+                if ((iter % 1000000LL) == 0 && atomicAdd(&g_jump_logs,1) < 200) {
+                    printf("[SLOPE-JUMP] sys=%d streamID=%ld t=%.9f new_h=%.3e jump=%.3e\n",
+                           sys, stream_ids[sys], t, h, jump);
+                }
+
+                // If already at H_MIN: no room left to shrink → declare stiff
+                if (fabs(h - h_prev) < 1e-20) {
+                    stiff = true;   // go implicit, stop retry spam
+                    break;
+                }
+                continue; // retry at same t with smaller h
             }
 
-            // Dense output and query emission for (t, t+h]
+            // Emit dense output for queries in (t, t+h]
             const double t1 = t + h;
             while (next_q < num_queries && query_times[next_q] <= t1) {
                 const double tq = query_times[next_q];
+                const long long flat_q = ((long long)sys * (long long)num_queries + (long long)next_q);
+                DBG_ASSERT(next_q >= 0 && next_q < num_queries, "next_q OOB %d/%d", next_q, num_queries);
+                DBG_ASSERT(flat_q >= 0 &&
+                           flat_q < (long long)num_systems * (long long)num_queries,
+                           "dense idx OOB: flat_q=%lld ns*nq=%lld",
+                           flat_q, (long long)num_systems * (long long)num_queries);
+                const long long base_idx = flat_q * N_EQ;
 
-                // If tq <= t (+EPS), emit the current state without interpolation.
                 if (tq <= t + EPS) {
-                    // Clamp for physical validity (matches later behavior)
                     double y_clamped[N_EQ];
                     for (int c = 0; c < N_EQ; ++c) y_clamped[c] = y[c];
                     Runoff5::project_nonnegative(y_clamped);
-
-                    // [B1] ─── bounds before writing ────────────────────
-                    const long long flat_q = ((long long)sys * (long long)num_queries + (long long)next_q);
-                    DBG_ASSERT(next_q >= 0 && next_q < num_queries, "next_q OOB %d/%d", next_q, num_queries);
-                    DBG_ASSERT(flat_q >= 0 &&
-                            flat_q < (long long)num_systems * (long long)num_queries,
-                            "dense idx OOB: flat_q=%lld ns*nq=%lld",
-                            flat_q, (long long)num_systems * (long long)num_queries);
-                    const long long base_idx = flat_q * N_EQ;
-                    // ────────────────────────────────────────────────────
-
-                    for (int c = 0; c < N_EQ; ++c) dense_all[base_idx + c] = static_cast<float>(y_clamped[c]);
+                    for (int c = 0; c < N_EQ; ++c) dense_all[base_idx + c] = (float)y_clamped[c];
                 } else {
-                    // Interpolate within the step at th = (tq - t)/h
                     const double th = (tq - t) / h;
                     double yd[N_EQ];
                     rk45_dense<Runoff5>(y, k45, N_EQ, h, th, yd);
                     Runoff5::project_nonnegative(yd);
-
-                    const long long flat_q = ((long long)sys * (long long)num_queries + (long long)next_q);
-                    DBG_ASSERT(next_q >= 0 && next_q < num_queries, "next_q OOB %d/%d", next_q, num_queries);
-                    DBG_ASSERT(flat_q >= 0 &&
-                            flat_q < (long long)num_systems * (long long)num_queries,
-                            "dense idx OOB: flat_q=%lld ns*nq=%lld",
-                            flat_q, (long long)num_systems * (long long)num_queries);
-                    const long long base_idx = flat_q * N_EQ;
-                    for (int c = 0; c < N_EQ; ++c) dense_all[base_idx + c] = static_cast<float>(yd[c]);
+                    for (int c = 0; c < N_EQ; ++c) dense_all[base_idx + c] = (float)yd[c];
                 }
-
                 ++next_q;
             }
 
-            // (optional belt-and-suspenders)
-            DBG_ASSERT(next_q <= num_queries, "next_q overflow: %d/%d", next_q, num_queries);
-
-            // Accept and advance time/state
-            Runoff5::project_nonnegative(y_next); // safety clamp for carried state
+            // Accept and advance
+            Runoff5::project_nonnegative(y_next);
             for (int i = 0; i < N_EQ; ++i) y[i] = y_next[i];
             t = t1;
 
-            // Standard PI-like step-size update with growth/decay clamps
-            double fac = devParams.safety * pow(1.0 / (err + 1e-16), 0.2);
-            fac = fmin(fmax(fac, devParams.minScale), devParams.maxScale);
-            h *= fac;
-            if (h < H_MIN) h = H_MIN; // keep nonzero
+            // ───── Guard B: persistent micro-steps relative to forcing cadence ───────────────
+            if (h < tiny_h_thresh) {
+                if (++tiny_h_accepted >= TINY_H_LIMIT) {
+                    printf("[STIFF-DETECTED] sys=%d streamID=%ld t=%.9f reason=micro_steps tiny_h=%d\n",
+                           sys, stream_ids[sys], t, tiny_h_accepted);
+                    stiff = true;
+                    break;  // Exit RK45 loop immediately to enter Radau fallback
+                 
+                }
+            } else {
+                // reset if we escape the micro-step regime
+                if (tiny_h_accepted) tiny_h_accepted = 0;
+            }
 
-             // Relative floor tied to forcing cadence: prevents controller pinning at μs scale
-             const double H_REL_FLOOR = 1e-6 * min_dt;  // 1 ppm of smallest cadence
-             if (h < H_REL_FLOOR) h = H_REL_FLOOR;
+            // Step-size update
+            double fac = rkDevParams.safety * pow(1.0 / (err + 1e-16), 0.2);
+            fac = fmin(fmax(fac, rkDevParams.minScale), rkDevParams.maxScale);
+            h *= fac;
+            if (h < H_MIN) h = H_MIN;
 
         } else {
             // ───────────── Rejected step ─────────────
             ++reject_count;
-
-            // On reject we only allow shrink (common practice)
-            double fac = devParams.safety * pow(1.0 / (err + 1e-16), 0.2);
+            if ((reject_count % 10) == 0 && atomicAdd(&g_reject_logs,1) < 200) {
+                printf("[REJECT] sys=%d streamID=%ld rej=%d t=%.9f h=%.3e err=%.3e\n",
+                       sys, stream_ids[sys], reject_count, t, h, err);
+            }
+            // Conservative shrink on reject
+            double fac = rkDevParams.safety * pow(1.0 / (err + 1e-16), 0.2);
             fac = fmin(fac, 1.0);
-            fac = fmin(fmax(fac, devParams.minScale), devParams.maxScale);
+            fac = fmin(fmax(fac, rkDevParams.minScale), rkDevParams.maxScale);
             h *= fac;
             if (h < H_MIN) h = H_MIN;
 
-            // ── Trigger “micro-fallback burst” if pathological (constraint)
-            const int STALL_TRIGGER = 2000;  // ~#iters with no time progress
-            if (reject_count > REJECT_LIMIT || h < H_MIN_ABS || stall_iters > STALL_TRIGGER) {
-                if (sys == 0) {
-                    printf("[TRIP] rej=%d h=%.3e stall=%d t=%.9f\n",
-                           reject_count, h, stall_iters, t);
+            if (reject_count > REJECT_LIMIT || h < H_MIN_ABS) {
+                if (atomicAdd(&g_stiff_logs,1) < 200) {
+                    printf("[STIFF-DETECTED] sys=%d streamID=%ld t=%.9f reason=reject_limit=%d h=%.3e\n",
+                           sys, stream_ids[sys], t, reject_count, h);
                 }
+                stiff = true; // host may run Radau/implicit out-of-kernel
+                break;  // Exit RK45 loop immediately to enter Radau fallback
+            }
+        }
 
-                // seconds (keep units consistent with original code)
-                // const double HFIX     = 0.06; // 0.06 s per micro-step
-                const double HFIX  = fmin(0.10 * min_dt, 300.0); // ≤10% cadence, ≤5 min !!!
-                const double MIN_ADV  = 1.2;  // 1.2 s net progress
-                const int    NFIX_MAX = 200;
-
-                double t_start = t;
-
-                if (FALLBACK_TO_TF) {
-                    // Finish the rest of the window with small RK4 steps,
-                    // respecting forcing boundaries and emitting queries.
-                    while (t < tf) {
-                        // Cap by next forcing boundary
-                        double gap_local = 1e300;
-                        for (int j = 0; j < nForc; ++j) {
-                            const double ss     = (t - t0) / dt_sec_cache[j];
-                            const double t_next = (floor(ss) + 1.0) * dt_sec_cache[j] + t0;
-                            const double g      = t_next - t;
-                            if (g > 0.0 && g < gap_local) gap_local = g;
-                        }
-                        double hs = (gap_local < HFIX ? gap_local : HFIX);
-                        if (t + hs > tf) hs = tf - t;
-                        if (hs <= 0.0) break;
-
-                        // rk4_fixed_step_seconds<Runoff5>(
-                        //     t, y, N_EQ, hs, sys, t0, num_systems,
-                        //     forc_base, dt_sec_cache, nT_cache, d_sp, nForc);
-
-                    // Logging when we switch to fallback
-                    if (!used_ros2w && sys == 0){
-                        printf("[SOLVER] sys=%d switching to ROS2W (reject-limit fallback) at t=%.4f\n", sys, t);
-                    }
-                    used_ros2w = true;
-
-
-                     if (!ros2w_step_seconds<Runoff5>(
-                             t, y, N_EQ, hs, sys, t0, num_systems,
-                             forc_base, dt_sec_cache, nT_cache, d_sp, nForc)) {
-                        // // Try once with half step; if still bad, bail as stiff
-                        //  hs *= 0.5;
-                        //  if (hs <= 0.0 || !ros2w_step_seconds<Runoff5>(
-                        //          t, y, N_EQ, hs, sys, t0, num_systems,
-                        //          forc_base, dt_sec_cache, nT_cache, d_sp, nForc)) {
-                        //      return;
-                        //  }
-                        // Try once with half step; if still bad, write what we have,
-                        // flag the system (distinct code) and return so the host can
-                        // see the failure instead of losing the result.
-                        hs *= 0.5;
-                        if (hs <= 0.0 || !ros2w_step_seconds<Runoff5>(
-                                t, y, N_EQ, hs, sys, t0, num_systems,
-                                forc_base, dt_sec_cache, nT_cache, d_sp, nForc)) {
-                            // Ensure we write a safe final state and set d_stiff so host
-                            // can diagnose that fallback failed for this system.
-                            Runoff5::project_nonnegative(y);
-                            for (int _i = 0; _i < N_EQ; ++_i) {
-                                y_final_all[sys * N_EQ + _i] = y[_i];
-                            }
-                            d_stiff[sys] = 99; // distinct code for "fallback failed"
-                            if (sys == 0) {
-                                printf("[SOLVER] sys=%d fallback FAILED at t=%.9f hs=%.3e -> d_stiff=99\n",
-                                    sys, t, hs);
-                            }
-                            return;
-                        }
-                    }
-
-                        // Emit any queries that are now ≤ t (no interpolation inside micro-step)
-                        while (next_q < num_queries && query_times[next_q] <= t + EPS) {
-                            const long long flat_q = ((long long)sys * (long long)num_queries + (long long)next_q);
-                            DBG_ASSERT(next_q >= 0 && next_q < num_queries, "next_q OOB %d/%d", next_q, num_queries);
-                            const long long base_idx = flat_q * N_EQ;
-                            double y_clamped[N_EQ];
-                            for (int c = 0; c < N_EQ; ++c) y_clamped[c] = y[c];
-                            Runoff5::project_nonnegative(y_clamped);
-                            for (int c = 0; c < N_EQ; ++c) dense_all[base_idx + c] = (float)y_clamped[c];
-                            ++next_q;
-                        }
-                    }
-                    // Write final and exit “successfully finished by fallback”
-                    Runoff5::project_nonnegative(y);
-                    for (int i = 0; i < N_EQ; ++i) y_final_all[sys * N_EQ + i] = y[i];
-                    if (sys == 0) {
-                        printf("[SOLVER] sys=%d completed with fixed-step fallback to tf = %.2f\n", sys, tf);
-                        }
-                    finished_by_fallback = true;
-                    d_stiff[sys] = 6; // Fallback finished (not an error)
-
-                    return;
-                } else {
-                    // Burst mode: advance by MIN_ADV (but not past next boundary),
-                    // then resume RK45 with a reset controller.
-                    double adv_target = MIN_ADV;
-                    double min_gap = 1e300;
-                    for (int j = 0; j < nForc; ++j) {
-                        const double ss     = (t - t0) / dt_sec_cache[j];
-                        const double t_next = (floor(ss) + 1.0) * dt_sec_cache[j] + t0;
-                        const double gap    = t_next - t;
-                        if (gap > 0.0 && gap < min_gap) min_gap = gap;
-                    }
-                    if (min_gap < adv_target) adv_target = min_gap;
-
-                    int steps = 0;
-                    while (t < tf && (t - t_start) + 1e-12 < adv_target && steps < NFIX_MAX) {
-                        double gap_local = 1e300;
-                        for (int j = 0; j < nForc; ++j) {
-                            const double ss     = (t - t0) / dt_sec_cache[j];
-                            const double t_next = (floor(ss) + 1.0) * dt_sec_cache[j] + t0;
-                            const double g      = t_next - t;
-                            if (g > 0.0 && g < gap_local) gap_local = g;
-                        }
-                        double hs = (gap_local < HFIX ? gap_local : HFIX);
-                        if (hs <= 0.0) break;
-
-                        // rk4_fixed_step_seconds<Runoff5>(
-                        //     t, y, N_EQ, hs, sys, t0, num_systems,
-                        //     forc_base, dt_sec_cache, nT_cache, d_sp, nForc);
-                        if (!ros2w_step_seconds<Runoff5>(
-                                t, y, N_EQ, hs, sys, t0, num_systems,
-                                forc_base, dt_sec_cache, nT_cache, d_sp, nForc)) {
-                            // halve once and retry; if still failing, mark stiff and exit
-                            hs *= 0.5;
-                            if (hs <= 0.0 || !ros2w_step_seconds<Runoff5>(
-                                    t, y, N_EQ, hs, sys, t0, num_systems,
-                                    forc_base, dt_sec_cache, nT_cache, d_sp, nForc)) {
-                                d_stiff[sys] = 1;
-                                return;
-                            }
-                        }
-
-
-                        ++steps;
-                    }
-
-                    if (t - t_start >= 1e-9) {
-                        // Emit any queries that we “passed” during burst (no interpolation)
-                        while (next_q < num_queries && query_times[next_q] <= t + EPS) {
-                            const long long flat_q = ((long long)sys * (long long)num_queries + (long long)next_q);
-                            DBG_ASSERT(next_q >= 0 && next_q < num_queries, "next_q OOB %d/%d", next_q, num_queries);
-                            const long long base_idx = flat_q * N_EQ;
-                            double y_clamped[N_EQ];
-                            for (int c = 0; c < N_EQ; ++c) y_clamped[c] = y[c];
-                            Runoff5::project_nonnegative(y_clamped);
-                            for (int c = 0; c < N_EQ; ++c) dense_all[base_idx + c] = (float)y_clamped[c];
-                            ++next_q;
-                        }
-                        // Resume RK45 with a modest step
-                        h = fmax(0.02, devParams.initialStep); // ~0.02 s minimum (seconds)
-                        reject_count = 0;
-                        stall_iters  = 0;  // reset stagnation counter
-                        continue;
-                    } else {
-                        stiff = true; // fallback couldn’t move → bail as before
-                    }
+        // ───── Guard A: time-progress watchdog (independent of accept/reject) ─────
+        if (fabs(t - t_prev) < eps_t) {
+            if (++no_prog_iters >= 50000) { // 50k iterations with < eps_t advance
+                // printf("[STIFF-DETECTED] sys=%d streamID=%ld t=%.9f reason=no_progress iters=%lld\n",
+                //        sys, stream_ids[sys], t, no_prog_iters);
+                if (atomicAdd(&g_stiff_logs,1) < 50) {
+                printf("[TIMEOUT] sys=%d streamID=%ld iters=%lld t=%.9f h=%.3e\n",
+                   sys, stream_ids[sys], (long long)iter, t, h);
                 }
-            } // end trip
-        } // end reject/accept
+                stiff = true;
+                break;  // Exit RK45 loop immediately to enter Radau fallback
+            }
+        } else {
+            no_prog_iters = 0;
+            t_prev = t;
+        }
+    } // while
 
-    } // ← end while (t < tf && !stiff && total_iters < MAX_TOTAL_ITERS)
-
-    // if (total_iters >= MAX_TOTAL_ITERS) {
-    //     // d_stiff[sys] = 5;  // fuse
-    //     // printf("[TIMEOUT] sys=%d hit iteration limit at t=%.9f\n", sys, t);
-    //     // return;
-    //     // ★ Iteration budget exhausted → likely pathological, but print context
-    //     d_stiff[sys] = 5;
-    //     printf("[TIMEOUT] sys=%d streamID=%ld iters=%lld window=%.6g s min_dt=%.6g s t=%.9f h=%.3e\n",
-    //            sys,stream_ids[sys],total_iters, window, min_dt, t, h);
-    //     return;
-    // }
-    // if (total_iters >= MAX_TOTAL_ITERS) {
-    //     d_stiff[sys] = 5;
-    //     printf("[SOLVER] sys=%d streamID=%ld hit iteration limit → TIMEOUT (iters=%lld, t=%.6f, h=%.3e)\n",
-    //            sys, total_iters, t, h);
-    //     return;
-    // }
-
-    if (total_iters >= MAX_TOTAL_ITERS) {
-        // Loop-tail timeout → zero outputs, flag, fence, and return
-        write_final_zero<N_EQ>(sys, y_final_all);
+    // Timeout / fuse
+    if (iter >= MAX_ITERS) {
         d_stiff[sys] = 5;
-        __threadfence();
-        printf("[SOLVER] sys=%d streamID=%ld hit iteration limit → TIMEOUT (iters=%lld, t=%.6f, h=%.3e)\n",
-            sys, stream_ids[sys], (long long)total_iters, t, h);
+        printf("[TIMEOUT] sys=%d streamID=%ld iters=%lld t=%.9f h=%.3e\n",
+               sys, stream_ids[sys], (long long)iter, t, h);
         return;
-        }
+    }
 
-    // ─── 2) Flag stiff and bail ───
+
+    // Stiff flag: switch to in-kernel Radau until tf
     if (stiff && t < tf) {
-        // write the *current* y to y_final_all so host doesn’t get zeros
+        if (sys == 0 && atomicAdd(&g_stiff_logs,1) < 20) {
+            DBG_PRINTF("[RADAU-SWITCH] sys=%d streamID=%ld t=%.9f h=%.3e  DevParams{ rtol=%.3e atol=%.3e safety=%.2f minScale=%.2f maxScale=%.2f h0=%.3e }\n",
+                       sys, stream_ids[sys], t, h,
+                       rkDevParams.rtol, rkDevParams.atol, rkDevParams.safety,
+                       rkDevParams.minScale, rkDevParams.maxScale, rkDevParams.initialStep);
+        }
+        while (t < tf) {
+            if (t + h > tf) h = tf - t;
+            // clamp to forcing boundary like RK45
+            double h_forc = 1e300;
+            for (int j = 0; j < nForc; ++j) {
+                const double dtj = dt_cache[j];
+                const double s   = (t - t0) / dtj;
+                const double tn  = (floor(s) + 1.0) * dtj + t0;
+                const double rem = tn - t;
+                if (rem > EPS) h_forc = fmin(h_forc, rem);
+            }
+            if (h_forc < 1e300 && h > h_forc) h = h_forc;
+
+            // one implicit step (Radau does its own forcing sampling)
+            double Z[3][N_EQ], y_next_r[N_EQ];
+            double errn = 0.0;
+            radau_step<Runoff5>(t, y, y_next_r, N_EQ, h, rtol, atol, &errn,
+                                sys, d_sp, d_forc_data, nForc, Z,
+                                /* sampling ctx */ t0, forc_base, dt_cache, nT_cache, num_systems);
+
+            if (errn <= 1.0) {
+                const double t1 = t + h;
+                // dense output for (t, t+h]
+                while (next_q < num_queries && query_times[next_q] <= t1) {
+                    const double tq = query_times[next_q];
+                    const long long flat_q = ((long long)sys * (long long)num_queries + (long long)next_q);
+                    const long long base_idx = flat_q * N_EQ;
+                    if (tq <= t + EPS) {
+                        double yc[N_EQ]; for (int c=0;c<N_EQ;++c) yc[c] = y[c];
+                        Runoff5::project_nonnegative(yc);
+                        for (int c=0;c<N_EQ;++c) dense_all[base_idx + c] = (float)yc[c];
+                    } else {
+                        const double th = (tq - t) / h;
+                        double yd[N_EQ];
+                        radau_dense<Runoff5>(y, Z, N_EQ, h, th, yd);
+                        Runoff5::project_nonnegative(yd);
+                        for (int c=0;c<N_EQ;++c) dense_all[base_idx + c] = (float)yd[c];
+                    }
+                    ++next_q;
+                }
+                // accept & advance
+                Runoff5::project_nonnegative(y_next_r);
+                for (int i=0;i<N_EQ;++i) y[i] = y_next_r[i];
+                t = t1;
+                // step size update (PI controller)
+                double fac = rkDevParams.safety * pow(1.0 / (errn + 1e-16), 0.2);
+                fac = fmin(fmax(fac, rkDevParams.minScale), rkDevParams.maxScale);
+                h *= fac; if (h < H_MIN) h = H_MIN;
+            } else {
+                // reject: shrink and retry
+                double fac = rkDevParams.safety * pow(1.0 / (errn + 1e-16), 0.2);
+                fac = fmin(fac, 1.0);
+                fac = fmin(fmax(fac, rkDevParams.minScale), rkDevParams.maxScale);
+                h *= fac; if (h < H_MIN) h = H_MIN;
+            }
+        }
+        // success after Radau fallback
         Runoff5::project_nonnegative(y);
-        for (int i = 0; i < N_EQ; ++i) {
+        for (int i = 0; i < N_EQ; ++i)
             y_final_all[sys * N_EQ + i] = y[i];
-        }
-        d_stiff[sys] = 1; // stiff flag
-        // printf("[STIFF-FLAG] sys=%d streamID=%ld stiff=%d (t=%.9f h=%.3e)\n", sys, d_stiff[sys], t, h);
-        printf("[STIFF-FLAG] sys=%d streamID=%llu stiff=%d (t=%.9f h=%.3e)\n",sys, (unsigned long long) stream_ids[sys], d_stiff[sys], t, h);
-       return; // Radau would be handled out-of-kernel in this design
+        d_stiff[sys] = 0;
+        return;
     }
 
-    // ─── 2.9) Success marker ───
-    // if (!used_ros2w && !finished_by_fallback && d_stiff[sys] == 0) {
-    //     printf("[SOLVER] sys=%d used RK45 successfully (no fallback)\n", sys);
-    // }
 
 
-    // ─── 3) Never stiff: write final state ───
+
+    // Success: write final state
     Runoff5::project_nonnegative(y);
-    for (int i = 0; i < N_EQ; ++i) {
-        // Checking if an overwrite occurs
-        int offset = sys * N_EQ + i;
-        if (fabs(y_final_all[offset] + 999.0) > 1e-6) {
-            printf("[OVERWRITE WARNING] sys=%d i=%d y_final_all[%d] already = %.5f\n",
-                sys, i, offset, y_final_all[offset]);
-        }
-        y_final_all[offset] = y[i];
-
+    for (int i = 0; i < N_EQ; ++i)
         y_final_all[sys * N_EQ + i] = y[i];
-    }
 
-    // if (sys == 0) {
-    //     printf("[SOLVER-END] sys=%d done → d_stiff=%d (used_ros2w=%d, fallback=%d)\n",
-    //            sys, d_stiff[sys], used_ros2w, finished_by_fallback);
-    // }
-
-    // Mark as successful RK45 completion
     d_stiff[sys] = 0;
-
-        // --- [BLOCK SUMMARY PRINT] ---
-    __syncthreads();
-    if (threadIdx.x == 0 && stiff_kill_count > 0) {
-        printf("[BLOCK-STIFF] block %d: %d early-stiff systems exited early (code=66)\n",
-               blockIdx.x, stiff_kill_count);
+    if (sys == 0) {
+        DBG_PRINTF("[SOLVER-END] sys=%d streamID=%ld done. iters=%lld queries=%d\n",
+                              sys, stream_ids[sys], (long long)iter, next_q);
     }
-
-
-
 }
 
 
 // ────────────────────────────────────────────────────────────────────────────
 // Explicit instantiation for Runoff5
 // ────────────────────────────────────────────────────────────────────────────
-// All 12 params in order:
 template __global__ void rk45_then_radau_multi<Runoff5>(
     double*,          // y0_all
     double*,          // y_final_all
     double*,          // query_times
-    //double*,          // dense_all
     float*,           // dense_all
     int,              // num_systems
     int,              // num_queries
     double,           // t0
     double,           // tf
     const Runoff5::SP_TYPE*, // d_sp
-    int*,              // d_stiff
-    const long*        // stream_ids
+    int*,             // d_stiff
+    const long*       // stream_ids
 );
-
-
