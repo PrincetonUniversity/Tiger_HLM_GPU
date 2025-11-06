@@ -645,15 +645,6 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
         // Ensure we do not simulate beyond the configured end_day
         int remainingDays = end_day - dayOffset + 1;
         int daysThisChunk = std::min(DAYS_PER_CHUNK, remainingDays);
-
-        // simulateChunk(config, streams, year, dayOffset, daysThisChunk, rank, usingMPI);!!!
-        // Determine if this is the last chunk of the year → include tf sample
-        // bool include_tf = (dayOffset + daysThisChunk - 1) == end_day; //!!!
-        
-        // Always include the chunk-end sample (tf). Safe because queries start at t0+Δ.
-        // bool include_tf = true;
-        // const bool is_last_chunk = (dayOffset + daysThisChunk - 1) == end_day;
-        // bool include_tf = is_last_chunk;
         bool include_tf = true;  // include the seam sample in every chunk
 
         // DEBUG: log chunk info
@@ -1146,6 +1137,7 @@ SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc, const std
 
     logGpu("Launching kernel: blocks=" + std::to_string(numBlocks) +
        ", threads=" + std::to_string(blockSize));
+
     logGpu("Systems=" + std::to_string(out.num_systems) +
        ", Queries=" + std::to_string(out.num_queries));
 
@@ -1166,6 +1158,7 @@ SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc, const std
 
 
     // Launch the solver
+    // DevParams now live in __constant__ memory for this launch
     rk45_then_radau_multi<Runoff5><<<numBlocks, blockSize>>>(
         out.d_y0_all, out.d_y_final_all,    // Initial and final states
         out.d_query_times, out.d_dense_all, // Query times and dense output
@@ -1183,89 +1176,8 @@ SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc, const std
     return out;
 }
 
-// ───────── Allocate GPU buffers and launch solver kernel
-// SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc) {
-//     SolverOutputs out;
-//     const int num_queries = static_cast<int>(input.h_query_times.size());
-//     const int num_systems = static_cast<int>(input.h_y0.size()) / Runoff5::N_EQ;
 
-//     // Build a seconds copy of the query times (kernel expects SECONDS)
-//     std::vector<double> h_query_times_sec(input.h_query_times);
-//     for (double &tq : h_query_times_sec) tq *= 60.0;
-
-//     // Setup device buffers using the SECONDS query vector
-//     auto [d_y0_all, d_y_final_all, d_query_times,
-//           d_dense_ptr, d_stiff_ptr, sys_count, query_count] =
-//         setup_gpu_buffers<Runoff5>(input.h_y0, h_query_times_sec);
-
-//     // Assign to output struct
-//     out.d_y0_all      = d_y0_all;
-//     out.d_y_final_all = d_y_final_all;
-//     out.d_query_times = d_query_times;
-//     out.d_dense_all   = d_dense_ptr;
-//     out.d_stiff       = d_stiff_ptr;
-//     out.num_systems   = sys_count;
-//     out.num_queries   = query_count;
-
-//     // Compute dense buffer size safely (use size_t to avoid 32-bit overflow)
-//     const size_t dense_elems =
-//         size_t(out.num_systems) * size_t(Runoff5::N_EQ) * size_t(out.num_queries);
-//     const size_t dense_bytes = dense_elems * sizeof(float); // dense output is float
-
-//     // Paranoid overflow guard
-//     if (out.num_systems > 0 && out.num_queries > 0) {
-//         const size_t back = dense_elems / size_t(Runoff5::N_EQ) / size_t(out.num_queries);
-//         if (back != size_t(out.num_systems)) {
-//             throw std::runtime_error("Overflow computing dense buffer size");
-//         }
-//     }
-
-//     CUDA_CHECK(cudaMemset(out.d_dense_all, 0xAB, dense_bytes));
-
-//     // Determine launch configuration
-//     int blockSize = 0, minGridSize = 0;
-//     cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize,
-//                                        rk45_then_radau_multi<Runoff5>, 0, 0);
-//     const int numBlocks = (out.num_systems + blockSize - 1) / blockSize;
-
-//     logGpu("Launching kernel: blocks=" + std::to_string(numBlocks) +
-//            ", threads=" + std::to_string(blockSize));
-//     logGpu("Systems=" + std::to_string(out.num_systems) +
-//            ", Queries=" + std::to_string(out.num_queries));
-
-//     // Spatial params device pointer
-//     SpatialParams* d_sp = nullptr;
-//     cudaMemcpyFromSymbol(&d_sp, devSpatialParamsPtr, sizeof(d_sp));
-
-//     // Convert window to SECONDS (kernel expects seconds)
-//     const double t0_sec = 60.0 * input.t0;
-//     const double tf_sec = 60.0 * input.tf;
-//     {
-//         char buf[160];
-//         std::snprintf(buf, sizeof(buf), "[LAUNCH] window=%.0f s (nq=%d)",
-//                       tf_sec - t0_sec, out.num_queries);
-//         logGpu(buf);
-//     }
-
-//     // Launch the solver (times and queries are in SECONDS)
-//     rk45_then_radau_multi<Runoff5><<<numBlocks, blockSize>>>(
-//         out.d_y0_all, out.d_y_final_all,     // Initial and final states
-//         out.d_query_times, out.d_dense_all,  // Query times (seconds) and dense output
-//         out.num_systems, out.num_queries,    // Number of systems and queries
-//         t0_sec, tf_sec,                      // Bounds (seconds)
-//         d_sp,                                // Spatial parameters on device
-//         out.d_stiff                          // Flags buffer
-//     );
-
-//     CUDA_CHECK(cudaPeekAtLastError());   // launch-time errors
-//     CUDA_CHECK(cudaDeviceSynchronize()); // runtime errors
-
-//     return out;
-// }
-
-
-
-// // Drop-in: always returns rates in mm/hr
+// Drop-in: always returns rates in mm/hr
 void compute_runoff_rate_mm_per_hr(
     const std::vector<float>& dense,     // cumulative meters at query times
     const std::vector<double>& y0,       // state at chunk start (GLOBAL cumulative meters)
@@ -1691,13 +1603,27 @@ void handleSolverOutputs(const ModelConfig& config,
         devSpatialParamsPtr
     );
 
-    // Count how many systems were skipped early due to t≈0 stall
-    int early_stiff_total = 0;
+    // === Summarize GPU solver exit codes ===
+    int n_ok=0, n_stiff=0, n_nan_lte=0, n_nan_state=0, n_timeout=0, n_cfgerr=0, n_other=0;
     for (int i = 0; i < ns; ++i) {
-        if (h_stiff[i] == 66) early_stiff_total++;
+        switch (h_stiff[i]) {
+            case 0: ++n_ok; break;
+            case 1: ++n_stiff; break;      // stiff flag set by kernel
+            case 2: ++n_nan_lte; break;
+            case 3: ++n_nan_state; break;
+            case 5: ++n_timeout; break;
+            case 7: ++n_cfgerr; break;
+            default: ++n_other; break;
+        }
     }
-    std::cout << "[SUMMARY] Total early-stiff systems skipped (code 66): "
-            << early_stiff_total << "\n";
+    std::cout
+    << "[SUMMARY] RK45 status: OK=" << n_ok
+    << " STIFF=" << n_stiff
+    << " NaN_LTE=" << n_nan_lte
+    << " NaN_STATE=" << n_nan_state
+    << " TIMEOUT=" << n_timeout
+    << " CFGERR=" << n_cfgerr
+    << " OTHER=" << n_other << "\n";
 
 
     // Sanity check: look for missing final states
@@ -2082,6 +2008,12 @@ if (!usingMPI) {
             }
         }
 
+        // Final clamps to avoid pathological values from config
+        const double H0_MIN = 1e-4;        // 0.006 s in minutes
+        if (!(hostP.initialStep > 0.0)) hostP.initialStep = 1e-2;
+        if (hostP.initialStep < H0_MIN)   hostP.initialStep = H0_MIN;
+        if (hostP.maxScale < hostP.minScale) std::swap(hostP.maxScale, hostP.minScale);
+
         // Optional: log what we actually use
         std::ostringstream oss;
         oss << std::scientific << std::setprecision(2)
@@ -2095,8 +2027,14 @@ if (!usingMPI) {
             << (config.override_initial_step ? " [h0:override]" : " [h0:default]");
         logGpu(std::string("Solver params: ") + oss.str());
 
-        // Push to device
-        CUDA_CHECK(cudaMemcpyToSymbol(devParams, &hostP, sizeof(hostP)));
+    // Push to device (matches the header symbol)
+    cudaError_t ce = cudaMemcpyToSymbol(rkDevParams, &hostP, sizeof(hostP));
+    if (ce != cudaSuccess) {
+        fprintf(stderr, "[CUDA ERROR] cudaMemcpyToSymbol(rkDevParams) failed: %s\n",
+                cudaGetErrorString(ce));
+        std::abort();
+    }
+
     }
 
 // Build, upload, run simulation
