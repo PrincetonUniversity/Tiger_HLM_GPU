@@ -83,8 +83,8 @@ void handleSolverOutputs(const ModelConfig& config,                 // Simulatio
                          const SolverInputs& input,                 // Solver inputs                                                       
                          const SolverOutputs& output,               // Solver outputs
                          std::vector<Stream<Runoff5>>& streams,      // Streams to update with final states
-                         int rank = 0, bool usingMPI = false);      // Rank of the MPI process (default 0, for single-process runs)
-                          
+                         int rank = 0, bool usingMPI = false,      // Rank of the MPI process (default 0, for single-process runs)
+                         bool is_last_chunk_of_year = false);       // Only write final.nc at year end if enabled
 
 
 /**
@@ -200,5 +200,6 @@ void simulateChunk(const ModelConfig& config,
                    std::vector<Stream<Runoff5>>& streams,
                    int simYear, int dayOffset, int daysThisChunk,
                    int rank = 0, bool usingMPI = false,
-                   bool include_tf = false);
+                   bool include_tf = false,
+                   bool is_last_chunk_of_year = false);
 
