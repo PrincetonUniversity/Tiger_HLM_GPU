@@ -115,19 +115,30 @@ void load_initial_from_final_nc_serial(
     std::vector<Stream<Runoff5>>& streams
 );
 
+
 /**
- * @brief Write per-chunk mean runoff rates (mm/hr) as a 2D (system, time) file.
- *        Expects one time sample per chunk (time dimension = 1).
+ * @brief Write per-chunk runoff rates (mm/hr) as a contiguous 2D (system, time) file.
  *
+ *   - Uses a fixed-size "time" dimension (length = num_queries)
+ *   - Stores "surface_runoff_mmhr" and "total_runoff_mmhr" contiguously on disk
+ * 
  * Variables:
  *   - surface_runoff_mmhr[system, time]
  *   - total_runoff_mmhr  [system, time]
+ * 
+ * Expected array layouts (row-major):
+ *   surf_mmhr [num_systems * num_queries]
+ *       linear index = system * num_queries + time
+ *   total_mmhr [num_systems * num_queries]
+ *       same layout as above
+ *
+ * time_vals is in "minutes since <time_origin>" units (e.g. 0, 60, 120, ...).
  */
 void write_runoff_rates_netcdf(const std::string& filename,
-                               const float*       surf_mmhr,   // size: num_systems * num_queries (usually 1)
-                               const float*       total_mmhr,  // size: num_systems * num_queries (usually 1)
-                               const double*      time_vals,   // minutes since time_origin
-                               const uint32_t*    linkid_vals,
+                               const float*       surf_mmhr,   // [num_systems * num_queries]
+                               const float*       total_mmhr,  // [num_systems * num_queries]
+                               const double*      time_vals,   // [num_queries], minutes since time_origin
+                               const uint32_t*    linkid_vals, // [num_systems]
                                int                num_systems,
-                               int                num_queries, // usually 1 for chunk mean
+                               int                num_queries,
                                const std::string& time_origin);
