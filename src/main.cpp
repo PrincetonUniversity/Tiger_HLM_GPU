@@ -118,17 +118,6 @@ inline void sort_by_stream(std::vector<SpatialParams>& v) {
 // Print “[IC CHECK] …” only once across the whole run (and only on rank 0)
 static bool g_ic_printed_once = false;
 
-// Is this the very first chunk of the whole simulation window?
-// static bool is_first_chunk_of_sim(const ModelConfig& cfg,
-//                                   int simYear, int dayOffset) {
-//     std::tm s = parseDate(cfg.time_start);
-//     const int start_year = s.tm_year + 1900;
-//     const int start_day  = computeDayOfYear(s);
-//     return (simYear == start_year) && (dayOffset == start_day);
-// }
-
-
-
 // check if the device has enough memory for the forcing data
 static void verifyDeviceForcingsHostSide(const NCForcing& chunk) {
     // 1) Pull back the scalars/arrays from __constant__ to host and compare
@@ -424,13 +413,6 @@ std::vector<Stream<Runoff5>> buildStreams(const std::vector<SpatialParams>& para
         // constant mode: prefer YAML values if present, else fallback to old default
         std::array<double, Runoff5::N_EQ> fallback = {0.01, 0.1, 0.0, 0.1, 0.01, 1, 1, 0, 0};
         
-        // // ─────────DEBUG print initial values ────────────────────────────────────
-        // std::cerr << "[CFG] initial_mode=" << config.initial_mode
-        //         << " values.size=" << config.initial_values.size() << "\n";
-        // for (size_t i = 0; i < config.initial_values.size(); ++i)
-        //     std::cerr << "[CFG] values[" << i << "]=" << config.initial_values[i] << "\n";
-        // // ────────────────────────────────────────────────────────────────────────
-
         if (!config.initial_values.empty()) {
             for (int i = 0; i < Runoff5::N_EQ; ++i)
                 y0_common[i] = config.initial_values[i];
@@ -544,7 +526,7 @@ bool isLeapYear(int year) {
     return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
 }
 
-// --- SUPER-SIMPLE GPU PROBE (prints a few SpatialParams + first 2 forcing samples) ---!!! 
+// ──── GPU Probe: prints a few SpatialParams + first 2 forcing samples ────
 __global__ void gpu_quick_probe(const SpatialParams* sp,
                                 const float* d_forc,
                                 const size_t* c_forc_nT_dev,
@@ -640,7 +622,6 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
 
     }
 
-
     for (int dayOffset = start_day; dayOffset <= end_day; dayOffset += DAYS_PER_CHUNK) {
         // Ensure we do not simulate beyond the configured end_day
         int remainingDays = end_day - dayOffset + 1;
@@ -653,7 +634,14 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
                 << " days=" << daysThisChunk
                 << " → include_tf=" << std::boolalpha << include_tf << "\n";
 
-        simulateChunk(config, streams, year, dayOffset, daysThisChunk, rank, usingMPI, include_tf);
+        // simulateChunk(config, streams, year, dayOffset, daysThisChunk, rank, usingMPI, include_tf);
+        {
+            const int remainingDays = end_day - (dayOffset + daysThisChunk - 1);
+            const bool is_last_chunk_of_year = (remainingDays <= 0);
+            simulateChunk(config, streams, year, dayOffset, daysThisChunk,
+                            rank, usingMPI, /*include_tf=*/true, is_last_chunk_of_year); 
+        }
+
 
 
         // Advance date pointer for next chunk
@@ -707,7 +695,7 @@ void simulateChunk(const ModelConfig& config,
                    int dayOffset,
                    int daysThisChunk,
                    int rank, bool usingMPI,
-                   bool include_tf) {
+                   bool include_tf, bool is_last_chunk_of_year) {
     // Determine if this is the first chunk of the whole simulation window
     // const bool first_chunk = is_first_chunk_of_sim(config, simYear, dayOffset);
 
@@ -801,18 +789,6 @@ void simulateChunk(const ModelConfig& config,
     // std::cout << "\n";
     }
 
-
-    // ───────── Run GPU DEBUG forcing check ─────────
-    // std::cout << "[DEBUG] Running safe GPU forcing check...\n";
-    // float* d_forc_ptr = nullptr;
-    // CUDA_CHECK(cudaMemcpyFromSymbol(&d_forc_ptr, d_forc_data, sizeof(float*)));
-    // checkForcingsOnDeviceSafe<<<1,1>>>(d_forc_ptr,
-    //                                 forcingChunk.nForc,
-    //                                 forcingChunk.days,
-    //                                 forcingChunk.systems,
-    //                                 forcingChunk.h_data.size());
-    // CUDA_CHECK(cudaDeviceSynchronize());
-
     // ───────── Prepare solver input arrays ─────────
     // DEBUG: print cumulative runoff values at chunk start (for first system)
     if (!streams.empty()) {
@@ -842,7 +818,7 @@ void simulateChunk(const ModelConfig& config,
 
     // ───────── Retrieve results and handle outputs ─────────
     TimePoint t_output_start = Clock::now();
-    handleSolverOutputs(config, simYear, dayOffset, daysThisChunk, solverInputs, solverOutputs, streams, rank, usingMPI);
+    handleSolverOutputs(config, simYear, dayOffset, daysThisChunk, solverInputs, solverOutputs, streams, rank, usingMPI, is_last_chunk_of_year);
     TimePoint t_output_end = Clock::now();
     std::cout << "[TIMER] Output writing took:"
             << elapsedSeconds(t_output_start, t_output_end) << " seconds\n";
@@ -994,10 +970,10 @@ void uploadForcingsToGpu(NCForcing& chunk) {
     }
 
 
-    // --- Make absolutely sure no kernels are still using the old buffer ---
+    // ──── Make absolutely sure no kernels are still using the old buffer ────
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // --- CLEANUP old allocation if it exists ---
+    // ──── CLEANUP old allocation if it exists ────
     float* old_ptr = nullptr;
     CUDA_CHECK(cudaMemcpyFromSymbol(&old_ptr, d_forc_data, sizeof(old_ptr)));
     if (old_ptr) {
@@ -1007,13 +983,13 @@ void uploadForcingsToGpu(NCForcing& chunk) {
         CUDA_CHECK(cudaMemcpyToSymbol(d_forc_data, &old_ptr, sizeof(old_ptr)));
     }
 
-    // --- Allocate for the new chunk ---
+    // ──── Allocate for the new chunk ────
     float* d_ptr = nullptr;
     size_t bytes = sizeof(float) * chunk.h_data.size();
     CUDA_CHECK(cudaMalloc(&d_ptr, bytes));
     CUDA_CHECK(cudaMemcpy(d_ptr, chunk.h_data.data(), bytes, cudaMemcpyHostToDevice));
 
-    // --- Update device symbols ---
+    // ──── Update device symbols ────
     CUDA_CHECK(cudaMemcpyToSymbol(d_forc_data, &d_ptr, sizeof(d_ptr)));
     CUDA_CHECK(cudaMemcpyToSymbol(nForc, &chunk.nForc, sizeof(int)));
     CUDA_CHECK(cudaMemcpyToSymbol(c_forc_dt, chunk.dt.data(), sizeof(double) * chunk.nForc));
@@ -1078,7 +1054,7 @@ SolverInputs prepareSolverInputs(int simYear,
 }
 
 
-// ───────── Allocate GPU buffers and launch solver kernel
+// ───────── Allocate GPU buffers and launch solver kernel ────────────────────────
 SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc, const std::vector<Stream<Runoff5>>& streams) {
     SolverOutputs out;
     int num_queries = input.h_query_times.size();
@@ -1125,8 +1101,6 @@ SolverOutputs launchSolverKernel(const SolverInputs& input, int nForc, const std
     }
 
     CUDA_CHECK(cudaMemset(out.d_dense_all, 0xAB, dense_bytes));
-
-
 
     // Determine launch configuration
     int blockSize = 0, minGridSize = 0;
@@ -1183,7 +1157,7 @@ void compute_runoff_rate_mm_per_hr(
     const std::vector<double>& y0,       // state at chunk start (GLOBAL cumulative meters)
     int ns, int nq, int N_EQ,
     int idx_surf, int idx_total,
-    double query_dt_min,                 // ← GLOBAL_QUERY_DT
+    double query_dt_min,                 // GLOBAL_QUERY_DT
     std::vector<float>& rate_surf_mmhr,
     std::vector<float>& rate_total_mmhr
 ) {
@@ -1320,7 +1294,7 @@ inline RunoffOut compute_runoff_rates_stitched(
     double gmin = +1e300, gmax = -1e300;
 
     for (int s = 0; s < ns; ++s) {
-        // ---- Monotone repair of LOCAL cumulatives (per system) ----
+        // ──── Monotone repair of LOCAL cumulatives (per system) ────
         // We repair on-the-fly and compute per-bin deltas:
         //   t==0 delta = repaired[0] - 0
         //   t>0  delta = repaired[t] - repaired[t-1]
@@ -1373,9 +1347,9 @@ inline RunoffOut compute_runoff_rates_stitched(
 }
 
 
-// -----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Global tolerances for runoff rate computation
-// -----------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 constexpr double RUNOFF_ABS_EPS_MM  = 0.01;   // mm, physical jitter tolerance
 constexpr double RUNOFF_REPAIR_EPS_M = 1e-8;  // m, numeric tolerance for monotone repair
 
@@ -1588,7 +1562,8 @@ void handleSolverOutputs(const ModelConfig& config,
                          const SolverInputs& input,
                          const SolverOutputs& output,
                          std::vector<Stream<Runoff5>>& streams,
-                         int rank, bool usingMPI) {
+                         int rank, bool usingMPI,
+                         bool is_last_chunk_of_year) {
     const int N_EQ = Runoff5::N_EQ;
     const int ns   = output.num_systems;
     const int nq   = output.num_queries;
@@ -1678,8 +1653,6 @@ void handleSolverOutputs(const ModelConfig& config,
         for (size_t i=0; i<v.size(); ++i) { mn = std::min(mn,(double)v[i]); mx = std::max(mx,(double)v[i]); sum += v[i]; }
         return std::tuple<double,double,double>(mn,mx,sum);
     };
-
-
     
     // Helper for indexing dense array: ((s * nq + t) * N_EQ + k)
     auto IDX = [&](int s,int t,int k)->size_t {
@@ -1698,13 +1671,26 @@ void handleSolverOutputs(const ModelConfig& config,
         }
     }
 
-
-    // Format start and end date strings for filenames
+    // Chunk date window for file basenames
     int Y = simYear, M = 1, D = 1;
     advanceDate(Y, M, D, dayOffset);
-    std::string sDate = formatDate(Y, M, D);
+    std::string sDate_chunk = formatDate(Y, M, D);
     advanceDate(Y, M, D, daysThisChunk - 1);
-    std::string eDate = formatDate(Y, M, D);
+    std::string eDate_chunk = formatDate(Y, M, D);
+
+    // Year-window names if final_per_year (clamped to configured window)
+    std::tm start_tm = parseDate(config.time_start);
+    std::tm end_tm   = parseDate(config.time_end);
+    const bool start_in_year = (start_tm.tm_year + 1900) == simYear;
+    const bool end_in_year   = (end_tm.tm_year   + 1900) == simYear;
+    int Ys_full = simYear, Ms_full = 1,  Ds_full = 1;
+    int Ye_full = simYear, Me_full = 12, De_full = 31;
+    if (start_in_year) { Ys_full = start_tm.tm_year + 1900; Ms_full = start_tm.tm_mon + 1; Ds_full = start_tm.tm_mday; }
+    if (end_in_year)   { Ye_full = end_tm.tm_year   + 1900; Me_full = end_tm.tm_mon + 1;   De_full = end_tm.tm_mday; }
+    std::string sDate_year = formatDate(Ys_full, Ms_full, Ds_full);
+    std::string eDate_year = formatDate(Ye_full, Me_full, De_full);
+
+
 
     // Determine rank tag for filenames
     // Append rank only when truly running multi-rank under MPI
@@ -1715,11 +1701,70 @@ void handleSolverOutputs(const ModelConfig& config,
     std::string rank_tag = (usingMPI && world_size > 1)
                             ? ("_rank" + std::to_string(rank))
                             : ""; // Only append rank if using MPI and more than 1 rank
-    // Construct output file paths
-    std::string final_file    = config.output_path + "/final_"   + sDate + "_" + eDate + rank_tag + ".nc";
-    std::string dense_file    = config.output_path + "/dense_"   + sDate + "_" + eDate + rank_tag + ".nc";
-    std::string runoff_file   = config.output_path + "/runoff_"  + sDate + "_" + eDate + rank_tag + ".nc";
+    
+    const std::string dense_base  = "dense_"  + sDate_chunk + "_" + eDate_chunk + rank_tag + ".nc";
+    const std::string runoff_base = "runoff_" + sDate_chunk + "_" + eDate_chunk + rank_tag + ".nc";
 
+    const bool write_final_now = (!config.final_per_year) || is_last_chunk_of_year;
+
+    // When final_per_year=true, use the literal filename from YAML (e.g., "final.nc")
+    // and DO NOT append dates or rank tags. Otherwise keep chunk-stamped naming.
+    std::string final_base;
+    if (config.final_per_year) {
+        // Stamp with the last chunk’s window (this function is called once per chunk)
+        final_base = "final_" + sDate_chunk + "_" + eDate_chunk + rank_tag + ".nc";
+    } else {
+        final_base = "final_" + sDate_chunk + "_" + eDate_chunk + rank_tag + ".nc";
+    }
+
+    // Construct output file paths relative to config.output_path
+    auto resolveOutput = [&](const std::string& base,
+                            const std::string& cfgPath,
+                            const std::string& prefix,
+                            const std::string& basename,
+                            const std::string& rank_tag)
+    {
+        // Treat leading slash as relative to base, not absolute
+        std::filesystem::path rel(cfgPath);
+        if (!cfgPath.empty() && cfgPath.front() == '/')
+            rel = cfgPath.substr(1); // "/final/final.nc" → "final/final.nc"
+
+        // Build directory under base
+        std::filesystem::path fullDir = std::filesystem::path(base) / rel.parent_path();
+
+        // Ensure directories exist
+        std::error_code ec;
+        std::filesystem::create_directories(fullDir, ec);
+        if (ec) {
+            std::cerr << "[WARN] Failed to create output directory: "
+                    << fullDir << " (" << ec.message() << ")\n";
+        }
+
+        // Combine directory and basename
+        return fullDir / basename;
+    };
+
+    // Construct full paths for dense, final, and runoff
+    std::filesystem::path dense_path  = resolveOutput(config.output_path, config.output_file,
+                                                    "dense", dense_base, rank_tag);
+    std::filesystem::path final_path  = resolveOutput(config.output_path, config.final_output_file,
+                                                    "final", final_base, rank_tag);
+    std::filesystem::path runoff_path = resolveOutput(config.output_path, config.runoff_output_file,
+                                                    "runoff", runoff_base, rank_tag);
+    // Ensure parent directories exist before creating filenames/printing
+    std::error_code ec;
+    std::filesystem::create_directories(dense_path.parent_path(),  ec);
+    std::filesystem::create_directories(final_path.parent_path(),  ec);
+    std::filesystem::create_directories(runoff_path.parent_path(), ec);
+
+    // Log resolved paths
+    std::cout << "[DEBUG] Dense output:  "  << dense_path  << std::endl;
+    std::cout << "[DEBUG] Final output:  "  << final_path  << std::endl;
+    std::cout << "[DEBUG] Runoff output: "  << runoff_path << std::endl;
+
+    const std::string dense_file  = dense_path.string();
+    const std::string final_file  = final_path.string();
+    const std::string runoff_file = runoff_path.string();
 
     // Prepare metadata arrays
     std::vector<uint32_t> link_ids(ns);
@@ -1732,16 +1777,19 @@ void handleSolverOutputs(const ModelConfig& config,
 
     std::string time_origin = std::to_string(simYear) + "-01-01T00:00:00Z";
 
-    // Write final state to NetCDF (2D)
+    // FINAL (2D): gated by final_per_year and last chunk of year
     if (!config.final_output_file.empty()) {
-        logWrite(std::filesystem::path(final_file).filename().string());
-        write_final_netcdf(final_file, h_y_final.data(),
-                        link_ids.data(), state_ids.data(),
-                        ns, N_EQ);
+        if (write_final_now) {
+            logWrite(std::filesystem::path(final_file).filename().string());
+            write_final_netcdf(final_file, h_y_final.data(),
+                               link_ids.data(), state_ids.data(),
+                               ns, N_EQ);
+        } else {
+            std::cout << "[SKIP] final per-year: not last chunk — deferring final write\n";
+        }
     } else {
         std::cout << "[SKIP] final output disabled via config\n";
     }
-
 
     // Write dense time output to NetCDF (3D) 
     if (!config.output_file.empty()) {
@@ -1868,7 +1916,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // ---- Validate GPU memory settings ----
+    // ──── Validate GPU memory settings ────────
     if (config.max_gpu_mem_gb <= 0.0) {
         throw std::runtime_error("Invalid config: max_gpu_mem_gb must be > 0");
     }
@@ -1962,10 +2010,10 @@ if (config.max_gpu_mem_gb > total_gb) {
 std::vector<SpatialParams> spatialParams;
 
 if (!usingMPI) {
-    // ---- SERIAL: load all, run on one GPU ----
+    // ──── SERIAL: load all, run on one GPU ────────
     spatialParams = loadSpatialParams(config.parameters_path + config.spatially_varying_file);
 } else {
-    // ---- MPI: ALL RANKS COMPUTE (equal split by stream ID) ----
+    // ──── MPI: ALL RANKS COMPUTE (equal split by stream ID) ────────
     // 1) Every rank loads the same CSV from shared FS (simple & robust)
     std::vector<SpatialParams> all =
         loadSpatialParams(config.parameters_path + config.spatially_varying_file);
@@ -2040,7 +2088,7 @@ if (!usingMPI) {
 // Build, upload, run simulation
 auto streams = buildStreams(spatialParams, config);
 
-// --- Hot start from final.nc if configured ---
+// ── Hot start from final.nc if configured ──────
 if (config.initial_mode == "from_file") {
     std::cout << "[INFO] Loading initial state from file: "
               << config.initial_file << "\n";
