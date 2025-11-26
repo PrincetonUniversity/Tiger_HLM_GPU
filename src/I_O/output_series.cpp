@@ -419,14 +419,21 @@ void load_initial_from_final_nc_serial(const std::string& path,
     NC_CHECK(nc_close(ncid));
 }
 
-
 /**
  * @brief Write per-chunk runoff rates (mm/hr) as a contiguous 2D (system, time) file.
  *
- */
  * Variables:
  *   - surface_runoff_mmhr[system, time]
  *   - total_runoff_mmhr  [system, time]
+*/
+void write_runoff_rates_netcdf(const std::string& filename,
+                               const float*       surf_mmhr,   // [num_systems * num_queries]
+                               const float*       total_mmhr,  // [num_systems * num_queries]
+                               const double*      time_vals,   // [num_queries]
+                               const uint32_t*    linkid_vals, // [num_systems]
+                               int                num_systems,
+                               int                num_queries,
+                               const std::string& time_origin)
 {
     int ncid, sys_dimid, time_dimid;
     int sys_varid, time_varid, surf_varid, total_varid;
