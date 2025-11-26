@@ -526,7 +526,10 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     
     // Load output
     config.print_interval = parser.getInt("output.print_interval");
+    // time step for query output in minutes (dense / runoff sampling)
     config.query_dt_minutes = parser.getDouble("output.query_dt", 60.0); // Default to 60 minutes if not specified
+    // controls how often to write 2D "final" snapshot files (system × variable)
+    config.final_interval_minutes = parser.getDouble("output.final_interval_minutes", 0.0);
     config.output_states = parser.getIntArray("output.states");
     config.output_path = parser.getString("output.output_path");
     config.output_file = parser.getString("output.output_file");
