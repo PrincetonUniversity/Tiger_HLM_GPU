@@ -54,6 +54,7 @@ namespace fs = std::filesystem;
 
 // ───────── Global Variables ─────────
 double GLOBAL_QUERY_DT = 60.0;   // default output interval (minutes)
+double GLOBAL_FINAL_INTERVAL_MIN = 0.0; // default: no periodic final snapshots
 
 // Bring in RK45 API functions
 using rk45_api::setup_gpu_buffers;   
@@ -1553,6 +1554,20 @@ inline RunoffOut compute_runoff_debug(
     return out;
 }
 
+// ───────── Formats a date (YYYY, MM, DD) into a string: "YYYYMMDD" ─────────
+std::string formatDate(int Y, int M, int D) {
+    char buf[9]; // YYYYMMDD + null terminator
+    std::snprintf(buf, sizeof(buf), "%04d%02d%02d", Y, M, D);
+    return std::string(buf); // Return as std::string
+}
+
+// ───────── Formats date+hour into "YYYYMMDDHH" ─────────
+std::string formatDateHour(int Y, int M, int D, int H) {
+    char buf[11]; // YYYYMMDDHH + null terminator
+    std::snprintf(buf, sizeof(buf), "%04d%02d%02d%02d", Y, M, D, H);
+    return std::string(buf);
+}
+
 
 // ───────── Handle outputs from the solver: retrieve results, write NetCDF files
 void handleSolverOutputs(const ModelConfig& config, 
@@ -1568,8 +1583,8 @@ void handleSolverOutputs(const ModelConfig& config,
     const int ns   = output.num_systems;
     const int nq   = output.num_queries;
 
-    // Retrieve results from device and free buffers
-    auto [h_y_final, h_dense, h_stiff] = retrieve_and_free<Runoff5>(
+    // Retrieve outputs from GPU
+    auto result = retrieve_and_free<Runoff5>(
         output.d_y0_all, output.d_y_final_all,
         output.d_query_times, output.d_dense_all,
         output.d_stiff,
@@ -1578,7 +1593,11 @@ void handleSolverOutputs(const ModelConfig& config,
         devSpatialParamsPtr
     );
 
-    // === Summarize GPU solver exit codes ===
+    auto& h_y_final = std::get<0>(result);
+    auto& h_dense   = std::get<1>(result);
+    auto& h_stiff   = std::get<2>(result);
+
+    // Summarize GPU solver exit codes 
     int n_ok=0, n_stiff=0, n_nan_lte=0, n_nan_state=0, n_timeout=0, n_cfgerr=0, n_other=0;
     for (int i = 0; i < ns; ++i) {
         switch (h_stiff[i]) {
@@ -1592,14 +1611,13 @@ void handleSolverOutputs(const ModelConfig& config,
         }
     }
     std::cout
-    << "[SUMMARY] RK45 status: OK=" << n_ok
-    << " STIFF=" << n_stiff
-    << " NaN_LTE=" << n_nan_lte
-    << " NaN_STATE=" << n_nan_state
-    << " TIMEOUT=" << n_timeout
-    << " CFGERR=" << n_cfgerr
-    << " OTHER=" << n_other << "\n";
-
+        << "[SUMMARY] RK45 status: OK=" << n_ok
+        << " STIFF=" << n_stiff
+        << " NaN_LTE=" << n_nan_lte
+        << " NaN_STATE=" << n_nan_state
+        << " TIMEOUT=" << n_timeout
+        << " CFGERR=" << n_cfgerr
+        << " OTHER=" << n_other << "\n";
 
     // Sanity check: look for missing final states
     int missing = 0;
@@ -1607,8 +1625,7 @@ void handleSolverOutputs(const ModelConfig& config,
         if (fabs(h_y_final[i] + 999.0) < 1e-6) missing++;
     }
     std::cout << "[CHECK] y_final_all: missing entries = " << missing
-            << " out of " << h_y_final.size() << "\n";
-
+              << " out of " << h_y_final.size() << "\n";
 
     // ── Seam check: look at the very last interval in this chunk ──
     if (rank==0 && ns>0 && nq>=2) {
@@ -1623,13 +1640,13 @@ void handleSolverOutputs(const ModelConfig& config,
         const double c1 = (double)h_dense[IDX(s,t1,Runoff5::STATE_SURF_RUNOFF)];   // meters (cumulative)
 
         std::cout << std::setprecision(12)
-                << "[SEAM] s=0 last interval: "
-                << "t0=" << input.h_query_times[t0]
-                << "  t1=" << input.h_query_times[t1]
-                << "  dt_hr=" << dt_last_hr
-                << "  c0=" << c0 << "  c1=" << c1
-                << "  rate(mm/hr)=" << (dt_last_hr>0 ? ((c1-c0)*1000.0/dt_last_hr) : -1.0)
-                << "\n";
+                  << "[SEAM] s=0 last interval: "
+                  << "t0=" << input.h_query_times[t0]
+                  << "  t1=" << input.h_query_times[t1]
+                  << "  dt_hr=" << dt_last_hr
+                  << "  c0=" << c0 << "  c1=" << c1
+                  << "  rate(mm/hr)=" << (dt_last_hr>0 ? ((c1-c0)*1000.0/dt_last_hr) : -1.0)
+                  << "\n";
     }
 
     // Compute runoff rates (now with t0 included in queries)
@@ -1646,28 +1663,29 @@ void handleSolverOutputs(const ModelConfig& config,
     const int nt_hourly = std::max(0, nq - 1);
     const double* hourly_times = (nq > 1) ? (input.h_query_times.data() + 1) : nullptr;
 
-
-    // Compact sanity stats (few prints only)!!!
+    // Small helper for min/max on vectors (kept from your original)
     auto vec_minmax = [&](const std::vector<float>& v){
         double mn = +1e300, mx = -1e300, sum = 0.0;
-        for (size_t i=0; i<v.size(); ++i) { mn = std::min(mn,(double)v[i]); mx = std::max(mx,(double)v[i]); sum += v[i]; }
+        for (size_t i=0;i<v.size(); ++i) {
+            mn = std::min(mn,(double)v[i]);
+            mx = std::max(mx,(double)v[i]);
+            sum += v[i];
+        }
         return std::tuple<double,double,double>(mn,mx,sum);
     };
-    
+
     // Helper for indexing dense array: ((s * nq + t) * N_EQ + k)
     auto IDX = [&](int s,int t,int k)->size_t {
         return (size_t(s)*size_t(nq)+size_t(t))*size_t(N_EQ)+size_t(k);
     };
 
-    // Define state indices before using them
     constexpr int IDX_SURF  = Runoff5::STATE_SURF_RUNOFF;
     constexpr int IDX_TOTAL = Runoff5::STATE_TOTAL_RUNOFF;
-
 
     // Update stream objects with final y0 state 
     for (int s = 0; s < ns; ++s) {
         for (int i = 0; i < N_EQ; ++i) {
-            streams[s].y0[i] = h_y_final[s * N_EQ + i];
+            streams[s].y0[i] = h_y_final[(size_t)s * (size_t)N_EQ + (size_t)i];
         }
     }
 
@@ -1685,44 +1703,44 @@ void handleSolverOutputs(const ModelConfig& config,
     const bool end_in_year   = (end_tm.tm_year   + 1900) == simYear;
     int Ys_full = simYear, Ms_full = 1,  Ds_full = 1;
     int Ye_full = simYear, Me_full = 12, De_full = 31;
-    if (start_in_year) { Ys_full = start_tm.tm_year + 1900; Ms_full = start_tm.tm_mon + 1; Ds_full = start_tm.tm_mday; }
-    if (end_in_year)   { Ye_full = end_tm.tm_year   + 1900; Me_full = end_tm.tm_mon + 1;   De_full = end_tm.tm_mday; }
+    if (start_in_year) {
+        Ys_full = start_tm.tm_year + 1900;
+        Ms_full = start_tm.tm_mon + 1;
+        Ds_full = start_tm.tm_mday;
+    }
+    if (end_in_year) {
+        Ye_full = end_tm.tm_year + 1900;
+        Me_full = end_tm.tm_mon + 1;
+        De_full = end_tm.tm_mday;
+    }
     std::string sDate_year = formatDate(Ys_full, Ms_full, Ds_full);
     std::string eDate_year = formatDate(Ye_full, Me_full, De_full);
 
-
-
     // Determine rank tag for filenames
-    // Append rank only when truly running multi-rank under MPI
     int world_size = 1;
     if (usingMPI) {
         MPI_Comm_size(MPI_COMM_WORLD, &world_size);
     }
     std::string rank_tag = (usingMPI && world_size > 1)
-                            ? ("_rank" + std::to_string(rank))
-                            : ""; // Only append rank if using MPI and more than 1 rank
-    
+                           ? ("_rank" + std::to_string(rank))
+                           : "";
+
     const std::string dense_base  = "dense_"  + sDate_chunk + "_" + eDate_chunk + rank_tag + ".nc";
     const std::string runoff_base = "runoff_" + sDate_chunk + "_" + eDate_chunk + rank_tag + ".nc";
 
+    // Old behavior flag (per chunk / per year)
     const bool write_final_now = (!config.final_per_year) || is_last_chunk_of_year;
 
-    // When final_per_year=true, use the literal filename from YAML (e.g., "final.nc")
-    // and DO NOT append dates or rank tags. Otherwise keep chunk-stamped naming.
-    std::string final_base;
-    if (config.final_per_year) {
-        // Stamp with the last chunk’s window (this function is called once per chunk)
-        final_base = "final_" + sDate_chunk + "_" + eDate_chunk + rank_tag + ".nc";
-    } else {
-        final_base = "final_" + sDate_chunk + "_" + eDate_chunk + rank_tag + ".nc";
-    }
+    // This is the old chunk-based final basename (used when periodic final is disabled)
+    std::string final_base_chunk =
+        "final_" + sDate_chunk + "_" + eDate_chunk + rank_tag + ".nc";
 
-    // Construct output file paths relative to config.output_path
+    // Helper to build resolved paths relative to config.output_path
     auto resolveOutput = [&](const std::string& base,
-                            const std::string& cfgPath,
-                            const std::string& prefix,
-                            const std::string& basename,
-                            const std::string& rank_tag)
+                             const std::string& cfgPath,
+                             const std::string& prefix,
+                             const std::string& basename,
+                             const std::string& rank_tag_str)
     {
         // Treat leading slash as relative to base, not absolute
         std::filesystem::path rel(cfgPath);
@@ -1737,33 +1755,30 @@ void handleSolverOutputs(const ModelConfig& config,
         std::filesystem::create_directories(fullDir, ec);
         if (ec) {
             std::cerr << "[WARN] Failed to create output directory: "
-                    << fullDir << " (" << ec.message() << ")\n";
+                      << fullDir << " (" << ec.message() << ")\n";
         }
 
         // Combine directory and basename
         return fullDir / basename;
     };
 
-    // Construct full paths for dense, final, and runoff
+    // Construct full paths for dense and runoff (final handled below)
     std::filesystem::path dense_path  = resolveOutput(config.output_path, config.output_file,
-                                                    "dense", dense_base, rank_tag);
-    std::filesystem::path final_path  = resolveOutput(config.output_path, config.final_output_file,
-                                                    "final", final_base, rank_tag);
+                                                      "dense", dense_base, rank_tag);
     std::filesystem::path runoff_path = resolveOutput(config.output_path, config.runoff_output_file,
-                                                    "runoff", runoff_base, rank_tag);
-    // Ensure parent directories exist before creating filenames/printing
-    std::error_code ec;
-    std::filesystem::create_directories(dense_path.parent_path(),  ec);
-    std::filesystem::create_directories(final_path.parent_path(),  ec);
-    std::filesystem::create_directories(runoff_path.parent_path(), ec);
+                                                      "runoff", runoff_base, rank_tag);
 
-    // Log resolved paths
+    // Ensure parent directories exist
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(dense_path.parent_path(),  ec);
+        std::filesystem::create_directories(runoff_path.parent_path(), ec);
+    }
+
     std::cout << "[DEBUG] Dense output:  "  << dense_path  << std::endl;
-    std::cout << "[DEBUG] Final output:  "  << final_path  << std::endl;
     std::cout << "[DEBUG] Runoff output: "  << runoff_path << std::endl;
 
     const std::string dense_file  = dense_path.string();
-    const std::string final_file  = final_path.string();
     const std::string runoff_file = runoff_path.string();
 
     // Prepare metadata arrays
@@ -1777,62 +1792,136 @@ void handleSolverOutputs(const ModelConfig& config,
 
     std::string time_origin = std::to_string(simYear) + "-01-01T00:00:00Z";
 
-    // FINAL (2D): gated by final_per_year and last chunk of year
+    // ───────── FINAL (2D) output logic ─────────
+    //  - If GLOBAL_FINAL_INTERVAL_MIN <= 0 → old behavior:
+    //      * one final per chunk or per year (depending on final_per_year)
+    //  - If GLOBAL_FINAL_INTERVAL_MIN > 0  → new behavior:
+    //      * write periodic "final" snapshots from dense (e.g., hourly restart files)
     if (!config.final_output_file.empty()) {
-        if (write_final_now) {
-            logWrite(std::filesystem::path(final_file).filename().string());
-            write_final_netcdf(final_file, h_y_final.data(),
-                               link_ids.data(), state_ids.data(),
-                               ns, N_EQ);
+        if (GLOBAL_FINAL_INTERVAL_MIN <= 0.0) {
+            // ── Old behavior ──
+            std::filesystem::path final_path  = resolveOutput(config.output_path,
+                                                              config.final_output_file,
+                                                              "final", final_base_chunk, rank_tag);
+            const std::string final_file = final_path.string();
+
+            std::cout << "[DEBUG] Final output (chunk/year): " << final_path << std::endl;
+
+            if (write_final_now) {
+                logWrite(std::filesystem::path(final_file).filename().string());
+                write_final_netcdf(final_file, h_y_final.data(),
+                                   link_ids.data(), state_ids.data(),
+                                   ns, N_EQ);
+            } else {
+                std::cout << "[SKIP] final per-year: not last chunk — deferring final write\n";
+            }
         } else {
-            std::cout << "[SKIP] final per-year: not last chunk — deferring final write\n";
+            // ── New behavior: periodic "final" snapshots from dense (hourly, etc.) ──
+            static int    g_final_year    = -1;
+            static double g_next_final_min = 0.0;  // minutes since YYYY-01-01 00Z
+
+            // Reset schedule on new year
+            if (g_final_year != simYear) {
+                g_final_year     = simYear;
+                g_next_final_min = GLOBAL_FINAL_INTERVAL_MIN; // first snapshot interval
+            }
+
+            // Align schedule with this chunk
+            const double t_chunk_start = input.h_query_times.empty()
+                                           ? input.t0
+                                           : input.h_query_times.front();
+            while (g_next_final_min + 1e-6 < t_chunk_start) {
+                g_next_final_min += GLOBAL_FINAL_INTERVAL_MIN;
+            }
+
+            // Helper to extract a snapshot from dense at query index q
+            auto extract_snapshot = [&](int q_index,
+                                        std::vector<double>& y_snap) {
+                y_snap.assign((size_t)ns * (size_t)N_EQ, 0.0);
+                auto IDX_dense = [&](int s,int t,int k)->size_t {
+                    return (size_t(s)*size_t(nq)+size_t(t))*size_t(N_EQ)+size_t(k);
+                };
+                for (int s = 0; s < ns; ++s) {
+                    for (int k = 0; k < N_EQ; ++k) {
+                        y_snap[(size_t)s * (size_t)N_EQ + (size_t)k] =
+                            (double)h_dense[IDX_dense(s, q_index, k)];
+                    }
+                }
+            };
+
+            // Loop over query times and emit any needed snapshots for this chunk
+            std::vector<double> y_snap;
+            for (int q = 0; q < nq; ++q) {
+                const double t_min = input.h_query_times[q]; // minutes since year start
+
+                // Emit all snapshots whose scheduled time is <= this query time
+                while (t_min + 1e-6 >= g_next_final_min) {
+                    const int total_min   = (int)std::llround(g_next_final_min);
+                    const int day_index   = total_min / 1440;          // 0-based day index
+                    const int minute_in_d = total_min % 1440;
+                    const int hour_in_d   = minute_in_d / 60;
+
+                    int FY = simYear, FM = 1, FD = 1;
+                    advanceDate(FY, FM, FD, day_index);
+                    std::string stamp = formatDateHour(FY, FM, FD, hour_in_d);
+
+                    std::string final_base_hour =
+                        "final_" + stamp + rank_tag + ".nc";
+
+                    std::filesystem::path final_path =
+                        resolveOutput(config.output_path,
+                                      config.final_output_file,
+                                      "final", final_base_hour, rank_tag);
+
+                    const std::string final_file = final_path.string();
+                    std::cout << "[DEBUG] Final output (interval): " << final_path << std::endl;
+
+                    extract_snapshot(q, y_snap);
+                    logWrite(std::filesystem::path(final_file).filename().string());
+                    write_final_netcdf(final_file,
+                                       y_snap.data(),
+                                       link_ids.data(), state_ids.data(),
+                                       ns, N_EQ);
+
+                    g_next_final_min += GLOBAL_FINAL_INTERVAL_MIN;
+                }
+            }
         }
     } else {
         std::cout << "[SKIP] final output disabled via config\n";
     }
 
-    // Write dense time output to NetCDF (3D) 
+    // ───────── DENSE 3D output ─────────
     if (!config.output_file.empty()) {
         logWrite(std::filesystem::path(dense_file).filename().string());
         write_dense_netcdf(dense_file, h_dense.data(),
-                        input.h_query_times.data(),
-                        link_ids.data(), state_ids.data(),
-                        nq, ns, N_EQ, time_origin);
+                           input.h_query_times.data(),
+                           link_ids.data(), state_ids.data(),
+                           nq, ns, N_EQ, time_origin);
     } else {
         std::cout << "[SKIP] dense output disabled via config\n";
     }
 
-    // Make hourly arrays now
+    // ───────── Runoff rate output (mm/hr, per-bin) ─────────
     std::vector<float> hourly_surf_mmhr  = std::move(r.surf_mmhr);
     std::vector<float> hourly_total_mmhr = std::move(r.total_mmhr);
+
     if (!config.runoff_output_file.empty()) {
         logWrite(std::filesystem::path(runoff_file).filename().string());
         write_runoff_rates_netcdf(
             runoff_file,
-            /*surf_mmhr*/  hourly_surf_mmhr.data(),   // ns * nq
-            /*total_mmhr*/ hourly_total_mmhr.data(),  // ns * nq
-            /*time_vals*/  hourly_times,              // length nq, endpoints for each bin
+            /*surf_mmhr*/  hourly_surf_mmhr.data(),   // ns * nt_hourly
+            /*total_mmhr*/ hourly_total_mmhr.data(),  // ns * nt_hourly
+            /*time_vals*/  hourly_times,              // length nt_hourly, endpoints for each bin
             /*link_ids*/   link_ids.data(),
             /*num_systems*/ns,
-            /*num_queries*/nt_hourly,                 // nq
+            /*num_queries*/nt_hourly,
             /*origin*/     time_origin
         );
-    } 
+    }
 
-    //std::cout << "[DONE] Outputs written for " << ns << " systems × " << nq << " time steps\n";
     std::cout << "[DONE] Rank " << rank << ": Outputs written for "
-          << ns << " systems × " << nq << " time steps\n";
-
-
-
-}
-
-
-// ───────── Formats a date (YYYY, MM, DD) into a string: "YYYYMMDD" ─────────
-std::string formatDate(int Y, int M, int D) {
-    char buf[9]; // YYYYMMDD + null terminator
-    std::snprintf(buf, sizeof(buf), "%04d%02d%02d", Y, M, D);
-    return std::string(buf); // Return as std::string
+              << ns << " systems × " << nq << " time steps\n";
 }
 
 // ───────── Advances a calendar date by a number of days ─────────
@@ -1973,6 +2062,23 @@ int main(int argc, char** argv) {
         }
         GLOBAL_QUERY_DT = qdt;
         std::cout << "[CONFIG] Query output interval = " << GLOBAL_QUERY_DT << " minutes\n";
+
+        // periodic "final" snapshots (2D system×variable) in minutes
+        // If <= 0, we fall back to old behavior (per-chunk / per-year)
+        double fint = config.final_interval_minutes;
+        if (!std::isfinite(fint) || fint <= 0.0) {
+            GLOBAL_FINAL_INTERVAL_MIN = 0.0;  // disabled
+            std::cout << "[CONFIG] Final snapshot interval disabled (output.final_interval_minutes <= 0)\n";
+        } else {
+            if (std::fabs(std::remainder(fint, qdt)) > 1e-6) {
+                std::cout << "[WARN] output.final_interval_minutes (" << fint
+                          << ") is not an integer multiple of output.query_dt (" << qdt
+                          << "). Snapshots will be aligned to query grid.\n";
+            }
+            GLOBAL_FINAL_INTERVAL_MIN = fint;
+            std::cout << "[CONFIG] Final snapshot interval = "
+                      << GLOBAL_FINAL_INTERVAL_MIN << " minutes\n";
+        }
     }
 
 
