@@ -4,6 +4,21 @@
 #include "../I_O/parameters_loader.hpp"  // for SpatialParams
 #include <cuda_runtime.h>
 
+// Shared solver parameters in constant memory 
+struct DevParams {
+    double rtol;
+    double atol;
+    double initialStep;
+    double safety;
+    double minScale;
+    double maxScale;
+};
+
+// Single declaration of the device constant used by all kernels
+// Defined exactly once in a rk45_kernel.cu file
+extern __constant__ DevParams rkDevParams;
+
+
 /**
  * GPU kernel that runs a single Dormand–Prince RK45 integrator on each thread.
  *
@@ -48,6 +63,7 @@ __global__ void rk45_then_radau_multi(
     double  t0,                             // initial time of integration
     double  tf,                             // final time of integration
     const typename Model::SP_TYPE* d_sp,    // device pointer to spatial parameters for each system
-    int*    d_stiff);                        // flags for stiffness detection 
+    int*    d_stiff,                        // flags for stiffness detection 
+    const long* stream_ids);                // device pointer to stream IDs for debugging
 
 #endif  // RK45_H

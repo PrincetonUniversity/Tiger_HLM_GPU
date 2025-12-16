@@ -7,7 +7,7 @@ __global__ void radau_kernel_multi(
     double* y0_all,
     double* y_final_all,
     double* query_times,
-    double* dense_all,
+    float* dense_all,
     int     num_systems,
     int     num_queries,
     double  t0,

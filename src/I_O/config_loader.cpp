@@ -224,14 +224,7 @@ void SimpleYamlParser::parseLines(const std::vector<std::string>& lines) {
                 std::vector<std::string> fullPath = sectionPath;
                 fullPath.push_back(key);
                 std::string fullKey = getSectionKey(fullPath);
-                
-                // Check if the value is an inline array
-                // if (isInlineArray(value)) {
-                //     std::vector<std::string> arrayItems = parseInlineArray(value);
-                //     simpleArrayMap[fullKey] = arrayItems;
-                // } else {
-                //     keyValueMap[fullKey] = removeQuotes(value);
-                // }
+              
                 // Check if the value is an inline array — USE cleanValue, not value
                 if (isInlineArray(cleanValue)) {
                     std::vector<std::string> arrayItems = parseInlineArray(cleanValue);
@@ -356,9 +349,6 @@ void SimpleYamlParser::printParsedData() {
 ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     SimpleYamlParser parser;
     parser.parseFile(filename);
-    // parser.printParsedData();  // DEBUG output of all parsed keys
-    // std::cerr << "[CFG] Loaded config: " << filename << "\n";
-    // parser.printParsedData(); // TEMP: shows keys and arrays
     
     ModelConfig config;
 
@@ -536,22 +526,16 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     
     // Load output
     config.print_interval = parser.getInt("output.print_interval");
+    // time step for query output in minutes (dense / runoff sampling)
     config.query_dt_minutes = parser.getDouble("output.query_dt", 60.0); // Default to 60 minutes if not specified
+    // controls how often to write 2D "final" snapshot files (system × variable)
+    config.final_interval_minutes = parser.getDouble("output.final_interval_minutes", 0.0);
     config.output_states = parser.getIntArray("output.states");
     config.output_path = parser.getString("output.output_path");
     config.output_file = parser.getString("output.output_file");
     config.final_output_file = parser.getString("output.final_output_file");
     config.runoff_output_file = parser.getString("output.runoff_output_file");
-    
-    // Load solver
-    // config.rtol = parser.getDouble("solver.rtol");
-    // config.atol = parser.getDouble("solver.atol");
-    // config.safety = parser.getDouble("solver.safety");
-    // config.min_scale = parser.getDouble("solver.min_scale");
-    // config.max_scale = parser.getDouble("solver.max_scale");
-    // config.override_tolerances = parser.getBool("solver.override_tolerances");
-    // config.initial_step = parser.getDouble("solver.initial_step");
-    // config.override_initial_step = parser.getBool("solver.override_initial_step");
+    config.final_per_year = parser.getBool("output.final_per_year", false);
 
     // Solver (provide defaults = current hard-coded values)
     config.rtol                 = parser.getDouble("solver.rtol",        1e-6);

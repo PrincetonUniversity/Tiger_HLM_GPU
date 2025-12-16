@@ -41,9 +41,8 @@ void write_dense_netcdf(const std::string& filename,
 
     // Define dimensions
     NC_CHECK(nc_def_dim(ncid, "system", num_systems, &sys_dimid));
-    // NC_CHECK(nc_def_dim(ncid, "time", num_queries, &time_dimid));
-    // Make time unlimited, we'll slice-write only num_queries samples
-    NC_CHECK(nc_def_dim(ncid, "time", NC_UNLIMITED, &time_dimid));
+    // FIXED-SIZE time so variables can be contiguous
+    NC_CHECK(nc_def_dim(ncid, "time", num_queries, &time_dimid));
     NC_CHECK(nc_def_dim(ncid, "variable", N_EQ, &var_dimid));
 
     // Define coordinate variables
@@ -67,31 +66,19 @@ void write_dense_netcdf(const std::string& filename,
     int dims[3] = {sys_dimid, time_dimid, var_dimid};
     NC_CHECK(nc_def_var(ncid, "outputs", NC_FLOAT, 3, dims, &dense_varid));
 
+    // Force contiguous layout (no chunking, no compression)
+    NC_CHECK(nc_def_var_chunking(ncid, dense_varid, NC_CONTIGUOUS, nullptr));
+
     // End define mode
     NC_CHECK(nc_enddef(ncid));
 
     // Write coordinate variables
     NC_CHECK(nc_put_var_uint( ncid, sys_varid, linkid_vals));
-    // NC_CHECK(nc_put_var_double(ncid, time_varid, time_vals));
-    NC_CHECK(nc_put_var_int(ncid, var_varid, state_vals));
-    if (num_queries > 0) {
-        size_t startT[1] = {0};
-        size_t countT[1] = {static_cast<size_t>(num_queries)};
-        NC_CHECK(nc_put_vara_double(ncid, time_varid, startT, countT, time_vals));
-    }
+    NC_CHECK(nc_put_var_double(ncid, time_varid, time_vals));
+    NC_CHECK(nc_put_var_int(   ncid, var_varid,  state_vals));
 
-    // Write main data
-    // NC_CHECK(nc_put_var_float(ncid, dense_varid, h_dense));
-    if (num_queries > 0) {
-        size_t start3[3] = {0, 0, 0};
-        size_t count3[3] = {
-            static_cast<size_t>(num_systems),
-            static_cast<size_t>(num_queries),
-            static_cast<size_t>(N_EQ)
-        };
-        NC_CHECK(nc_put_vara_float(ncid, dense_varid, start3, count3, h_dense));
-    }
-
+    // Single, contiguous write
+    NC_CHECK(nc_put_var_float(ncid, dense_varid, h_dense));
 
     // Close file
     NC_CHECK(nc_close(ncid));
@@ -128,8 +115,6 @@ void write_final_netcdf(const std::string& filename,
     // Define main data variable
     int dims[2] = {sys_dimid, var_dimid};
     NC_CHECK(nc_def_var(ncid, "outputs", NC_DOUBLE, 2, dims, &final_varid));
-
-   
 
     // End define mode
     NC_CHECK(nc_enddef(ncid));
@@ -169,9 +154,8 @@ void write_runoff_dense_netcdf(const std::string& filename,
 
     // Define dimensions
     NC_CHECK(nc_def_dim(ncid, "system", num_systems, &sys_dimid));
-    // NC_CHECK(nc_def_dim(ncid, "time",   num_queries, &time_dimid));
-    // Unlimited time; slice write num_queries samples
-    NC_CHECK(nc_def_dim(ncid, "time",   NC_UNLIMITED, &time_dimid));
+    // FIXED-SIZE time so runoff vars can be contiguous
+    NC_CHECK(nc_def_dim(ncid, "time",   num_queries,  &time_dimid));
 
     // Define coordinate variables
     NC_CHECK(nc_def_var(ncid, "system", NC_UINT,   1, &sys_dimid,  &sys_varid));
@@ -204,23 +188,18 @@ void write_runoff_dense_netcdf(const std::string& filename,
         NC_CHECK(nc_put_att_float(ncid, total_varid, "_FillValue",  NC_FLOAT, 1, &fv));
         NC_CHECK(nc_put_att_float(ncid, surf_varid,  "missing_value",  NC_FLOAT, 1, &fv));
         NC_CHECK(nc_put_att_float(ncid, total_varid, "missing_value",  NC_FLOAT, 1, &fv));
+        
     }
+    // Force contiguous layout on data vars (coords are contiguous by default)
+    NC_CHECK(nc_def_var_chunking(ncid, surf_varid,  NC_CONTIGUOUS, nullptr));
+    NC_CHECK(nc_def_var_chunking(ncid, total_varid, NC_CONTIGUOUS, nullptr));
 
     // End define mode
     NC_CHECK(nc_enddef(ncid));
 
     // Write coordinate variables
     NC_CHECK(nc_put_var_uint(  ncid, sys_varid,  linkid_vals));
-    // NC_CHECK(nc_put_var_double(ncid, time_varid, time_vals));
-    if (num_queries > 0) {
-        size_t startT[1] = {0};
-        size_t countT[1] = {static_cast<size_t>(num_queries)};
-        NC_CHECK(nc_put_vara_double(ncid, time_varid, startT, countT, time_vals));
-    }
-
-    // Extract surface and total runoff into temporary buffers
-    // std::vector<float> surf_data(size_t(num_systems) * size_t(num_queries));
-    // std::vector<float> total_data(size_t(num_systems) * size_t(num_queries));
+    NC_CHECK(nc_put_var_double(ncid, time_varid, time_vals));
 
     std::vector<float> surf_data(
         static_cast<size_t>(num_systems) * static_cast<size_t>(std::max(0, num_queries)));
@@ -236,16 +215,9 @@ void write_runoff_dense_netcdf(const std::string& filename,
         }
     }
 
-    // Write runoff data
-    // NC_CHECK(nc_put_var_float(ncid, surf_varid,  surf_data.data()));
-    // NC_CHECK(nc_put_var_float(ncid, total_varid, total_data.data()));
-    if (num_queries > 0) {
-        size_t start2[2] = {0, 0};
-        size_t count2[2] = {static_cast<size_t>(num_systems),
-                            static_cast<size_t>(num_queries)};
-        NC_CHECK(nc_put_vara_float(ncid, surf_varid,  start2, count2, surf_data.data()));
-        NC_CHECK(nc_put_vara_float(ncid, total_varid, start2, count2, total_data.data()));
-    }
+    // One-shot writes (contiguous on disk)
+    NC_CHECK(nc_put_var_float(ncid, surf_varid,  surf_data.data()));
+    NC_CHECK(nc_put_var_float(ncid, total_varid, total_data.data()));
 
     // Close file
     NC_CHECK(nc_close(ncid));
@@ -276,10 +248,9 @@ void write_selected_dense_netcdf(const std::string& filename,
     NC_CHECK(nc_create(filename.c_str(), NC_NETCDF4 | NC_CLOBBER, &ncid));
 
     // Define dimensions
+    // Use fixed-size time so variables can be stored contiguously
     NC_CHECK(nc_def_dim(ncid, "system", num_systems, &sys_dimid));
-    // NC_CHECK(nc_def_dim(ncid, "time",   num_queries, &time_dimid));
-    // Unlimited time; we'll write only num_queries via slices
-    NC_CHECK(nc_def_dim(ncid, "time",   NC_UNLIMITED, &time_dimid));
+    NC_CHECK(nc_def_dim(ncid, "time",   num_queries, &time_dimid));
 
     // Define coordinate variables
     NC_CHECK(nc_def_var(ncid, "system", NC_UINT,   1, &sys_dimid,  &sys_varid));
@@ -303,20 +274,20 @@ void write_selected_dense_netcdf(const std::string& filename,
                             2,
                             dims2,
                             &varids[i]));
+        // 👉 Force contiguous layout for each selected state
+        NC_CHECK(nc_def_var_chunking(ncid, varids[i], NC_CONTIGUOUS, nullptr));
     }
-
     // End define mode
     NC_CHECK(nc_enddef(ncid));
 
     // Write coords
-    // NC_CHECK(nc_put_var_uint(  ncid, sys_varid,  linkid_vals));
-    // NC_CHECK(nc_put_var_double(ncid, time_varid, time_vals));
     NC_CHECK(nc_put_var_uint(ncid, sys_varid, linkid_vals));
     if (num_queries > 0) {
         size_t startT[1] = {0};
         size_t countT[1] = {static_cast<size_t>(num_queries)};
         NC_CHECK(nc_put_vara_double(ncid, time_varid, startT, countT, time_vals));
     }
+
 
     // For each selected variable, extract into a temp buffer and write
     // std::vector<float> buffer(size_t(num_systems) * size_t(num_queries));
@@ -332,13 +303,15 @@ void write_selected_dense_netcdf(const std::string& filename,
                 buffer[linear] = h_dense[src];
             }
         }
-        // NC_CHECK(nc_put_var_float(ncid, varids[i], buffer.data()));
+        
         if (num_queries > 0) {
             size_t start2[2] = {0, 0};
-            size_t count2[2] = {static_cast<size_t>(num_systems),
-                                static_cast<size_t>(num_queries)};
+            size_t count2[2] = {
+                static_cast<size_t>(num_systems),
+                static_cast<size_t>(num_queries)
+            };
             NC_CHECK(nc_put_vara_float(ncid, varids[i], start2, count2, buffer.data()));
-        }
+        } 
     }
 
     // Close file
@@ -447,180 +420,17 @@ void load_initial_from_final_nc_serial(const std::string& path,
 }
 
 /**
- * @brief Write per-chunk mean runoff rates (mm/hr) as a 2D (system, time) file.
- *        Expects one time sample per chunk (time dimension = 1).
- */
-// void write_runoff_rates_netcdf(const std::string& filename,
-//                                const float*       surf_mmhr,   // size: num_systems * num_queries (usually 1)
-//                                const float*       total_mmhr,  // size: num_systems * num_queries (usually 1)
-//                                const double*      time_vals,   // minutes since time_origin
-//                                const uint32_t*    linkid_vals,
-//                                int                num_systems,
-//                                int                num_queries, // usually 1 for chunk mean
-//                                const std::string& time_origin)
-// {
-//     int ncid, sys_dimid, time_dimid;
-//     int sys_varid, time_varid, surf_varid, total_varid;
-
-//     // // Create file
-//     // NC_CHECK(nc_create(filename.c_str(), NC_NETCDF4 | NC_CLOBBER, &ncid));
-
-//     // ---------------------------------------------------------------------
-//     // Sanity checks (prevents invalid NetCDF args when num_queries == 0)
-//     // ---------------------------------------------------------------------
-//     if (num_systems <= 0 || num_queries <= 0 || time_vals == nullptr ||
-//         surf_mmhr == nullptr || total_mmhr == nullptr || linkid_vals == nullptr) {
-//         std::cerr << "[RUNOFF_NC] Skipping write for " << filename
-//                   << " (num_systems=" << num_systems
-//                   << ", num_queries=" << num_queries << ")\n";
-//         return;
-//     }
-
-//     std::cerr << "[RUNOFF_NC] Writing " << filename
-//               << " with " << num_systems << " systems × "
-//               << num_queries << " time steps.\n";
-
-//     // Create file
-//     // NC_CHECK(nc_create(filename.c_str(), NC_NETCDF4 | NC_CLOBBER, &ncid));
-//     int status = nc_open(filename.c_str(), NC_WRITE, &ncid);
-//     bool exists = (status == NC_NOERR);
-
-//     if (!exists) {
-//         NC_CHECK(nc_create(filename.c_str(), NC_NETCDF4 | NC_CLOBBER, &ncid));
-//         // define dims/vars here
-//         ...
-//         NC_CHECK(nc_enddef(ncid));
-//     } else {
-//         // open existing
-//         NC_CHECK(nc_inq_dimid(ncid, "system", &sys_dimid));
-//         NC_CHECK(nc_inq_dimid(ncid, "time",   &time_dimid));
-//         NC_CHECK(nc_inq_varid(ncid, "system", &sys_varid));
-//         NC_CHECK(nc_inq_varid(ncid, "time",   &time_varid));
-//         NC_CHECK(nc_inq_varid(ncid, "surface_runoff_mmhr", &surf_varid));
-//         NC_CHECK(nc_inq_varid(ncid, "total_runoff_mmhr",   &total_varid));
-//     }
-
-//     // // Define dimensions
-//     // NC_CHECK(nc_def_dim(ncid, "system", num_systems, &sys_dimid));
-//     // // NC_CHECK(nc_def_dim(ncid, "time",   num_queries, &time_dimid));
-//     // // Unlimited time; slice-write the single (or few) samples
-//     // NC_CHECK(nc_def_dim(ncid, "time",   NC_UNLIMITED, &time_dimid));
-
-//     // NC_CHECK(nc_def_dim(ncid, "system", num_systems, &sys_dimid));
-
-//     // // Define the time dimension explicitly for this file — runoff rates
-//     // // have (nq - 1) samples compared to full-state arrays.
-//     // NC_CHECK(nc_def_dim(ncid, "time", num_queries, &time_dimid));
-
-//     // Define dimensions
-//     NC_CHECK(nc_def_dim(ncid, "system",  num_systems,  &sys_dimid));
-//     // Make time UNLIMITED so we can append chunks safely.
-//     NC_CHECK(nc_def_dim(ncid, "time",    NC_UNLIMITED, &time_dimid));
-
-
-//     // Define coordinate variables
-//     NC_CHECK(nc_def_var(ncid, "system", NC_UINT,   1, &sys_dimid,  &sys_varid));
-//     NC_CHECK(nc_def_var(ncid, "time",   NC_DOUBLE, 1, &time_dimid, &time_varid));
-//     NC_CHECK(nc_put_att_text(ncid, sys_varid,  "long_name", 6, "LinkID"));
-//     NC_CHECK(nc_put_att_text(ncid, time_varid, "long_name", 4, "Time"));
-
-//     const std::string tu = "minutes since " + time_origin;
-//     NC_CHECK(nc_put_att_text(ncid, time_varid, "units",    tu.size(), tu.c_str()));
-//     NC_CHECK(nc_put_att_text(ncid, time_varid, "calendar", 9, "gregorian"));
-
-//     // Define data variables: surface and total mean rates (mm/hr)
-//     int dims2[2] = { sys_dimid, time_dimid };
-//     NC_CHECK(nc_def_var(ncid, "surface_runoff_mmhr", NC_FLOAT, 2, dims2, &surf_varid));
-//     NC_CHECK(nc_def_var(ncid, "total_runoff_mmhr",   NC_FLOAT, 2, dims2, &total_varid));
-
-//     // force contiguous layout (no chunking)
-//     NC_CHECK(nc_def_var_chunking(ncid, surf_varid,  NC_CONTIGUOUS, nullptr));
-//     NC_CHECK(nc_def_var_chunking(ncid, total_varid, NC_CONTIGUOUS, nullptr));
-
-//     // Variable metadata
-//     // NC_CHECK(nc_put_att_text(ncid, surf_varid,  "long_name", 27, "Surface runoff mean rate"));
-//     // NC_CHECK(nc_put_att_text(ncid, total_varid, "long_name", 25, "Total runoff mean rate"));
-//     NC_CHECK(nc_put_att_text(ncid, surf_varid,  "long_name", 22, "Surface runoff rate"));
-//     NC_CHECK(nc_put_att_text(ncid, total_varid, "long_name", 20, "Total runoff rate"));
-//     NC_CHECK(nc_put_att_text(ncid, surf_varid,  "units",      7, "mm hr-1"));
-//     NC_CHECK(nc_put_att_text(ncid, total_varid, "units",      7, "mm hr-1"));
-
-//     {
-//         float fv = -9999.0f;
-//         NC_CHECK(nc_put_att_float(ncid, surf_varid,  "_FillValue",    NC_FLOAT, 1, &fv));
-//         NC_CHECK(nc_put_att_float(ncid, total_varid, "_FillValue",    NC_FLOAT, 1, &fv));
-//         NC_CHECK(nc_put_att_float(ncid, surf_varid,  "missing_value", NC_FLOAT, 1, &fv));
-//         NC_CHECK(nc_put_att_float(ncid, total_varid, "missing_value", NC_FLOAT, 1, &fv));
-//     }
-
-//     // End define mode
-//     NC_CHECK(nc_enddef(ncid));
-
-//     // // Write coordinates
-//     // NC_CHECK(nc_put_var_uint(  ncid, sys_varid,  linkid_vals));
-//     // // NC_CHECK(nc_put_var_double(ncid, time_varid, time_vals));
-//     // if (num_queries > 0) {
-//     //     size_t startT[1] = {0};
-//     //     size_t countT[1] = {static_cast<size_t>(num_queries)};
-//     //     NC_CHECK(nc_put_vara_double(ncid, time_varid, startT, countT, time_vals));
-//     // }
-
-//     // NC_CHECK(nc_put_var_uint(ncid, sys_varid, linkid_vals));
-
-//     // // Write time coordinates — exactly num_queries entries
-//     // {
-//     //     size_t startT[1] = {0};
-//     //     size_t countT[1] = {static_cast<size_t>(num_queries)};
-//     //     NC_CHECK(nc_put_vara_double(ncid, time_varid, startT, countT, time_vals));
-//     // }
-
-//     // Coordinates: systems written all-at-once
-//     NC_CHECK(nc_put_var_uint(ncid, sys_varid, linkid_vals));
-
-//     // Compute current time length (append offset)
-//     size_t tlen = 0;
-//     NC_CHECK(nc_inq_dimlen(ncid, time_dimid, &tlen));
-
-//     // Write time coordinates starting at tlen
-//     {
-//         size_t startT[1] = { tlen };
-//         size_t countT[1] = { static_cast<size_t>(num_queries) };
-//         NC_CHECK(nc_put_vara_double(ncid, time_varid, startT, countT, time_vals));
-//     }
-
-
-//     // // Write data
-//     // // NC_CHECK(nc_put_var_float(ncid, surf_varid,  surf_mmhr));
-//     // // NC_CHECK(nc_put_var_float(ncid, total_varid, total_mmhr));
-
-//     // if (num_queries > 0) {
-//     //     size_t start2[2] = {0, 0};
-//     //     size_t count2[2] = {static_cast<size_t>(num_systems),
-//     //                         static_cast<size_t>(num_queries)};
-//     //     NC_CHECK(nc_put_vara_float(ncid, surf_varid,  start2, count2, surf_mmhr));
-//     //     NC_CHECK(nc_put_vara_float(ncid, total_varid, start2, count2, total_mmhr));
-//     // }
-
-//     if (num_queries > 0) {
-//         size_t start2[2] = { 0, tlen };   // append along time
-//         size_t count2[2] = {
-//             static_cast<size_t>(num_systems),
-//             static_cast<size_t>(num_queries)
-//         };
-//         NC_CHECK(nc_put_vara_float(ncid, surf_varid,  start2, count2, surf_mmhr));
-//         NC_CHECK(nc_put_vara_float(ncid, total_varid, start2, count2, total_mmhr));
-//     }
-
-//     // Close
-//     NC_CHECK(nc_close(ncid));
-// }
-
-
+ * @brief Write per-chunk runoff rates (mm/hr) as a contiguous 2D (system, time) file.
+ *
+ * Variables:
+ *   - surface_runoff_mmhr[system, time]
+ *   - total_runoff_mmhr  [system, time]
+*/
 void write_runoff_rates_netcdf(const std::string& filename,
-                               const float*       surf_mmhr,
-                               const float*       total_mmhr,
-                               const double*      time_vals,
-                               const uint32_t*    linkid_vals,
+                               const float*       surf_mmhr,   // [num_systems * num_queries]
+                               const float*       total_mmhr,  // [num_systems * num_queries]
+                               const double*      time_vals,   // [num_queries]
+                               const uint32_t*    linkid_vals, // [num_systems]
                                int                num_systems,
                                int                num_queries,
                                const std::string& time_origin)
@@ -628,164 +438,80 @@ void write_runoff_rates_netcdf(const std::string& filename,
     int ncid, sys_dimid, time_dimid;
     int sys_varid, time_varid, surf_varid, total_varid;
 
-    // Basic guards
+    // Basic guards to avoid invalid NetCDF calls
     if (num_systems <= 0 || num_queries <= 0 ||
         surf_mmhr == nullptr || total_mmhr == nullptr ||
-        time_vals == nullptr || linkid_vals == nullptr) {
+        time_vals == nullptr || linkid_vals == nullptr)
+    {
         std::cerr << "[RUNOFF_NC] Skipping write for " << filename
                   << " (num_systems=" << num_systems
                   << ", num_queries=" << num_queries << ")\n";
         return;
     }
 
-    // Try to open existing file for append
-    int status = nc_open(filename.c_str(), NC_WRITE, &ncid);
-    bool exists = (status == NC_NOERR);
-    bool schema_ok = false;
+    // Create a fresh NetCDF-4 file (overwrite if it exists)
+    NC_CHECK(nc_create(filename.c_str(), NC_NETCDF4 | NC_CLOBBER, &ncid));
 
-    if (exists) {
-        // Validate expected schema; if anything is missing, recreate the file
-        int chk_sys_dim=-1, chk_time_dim=-1;
-        int chk_sys_var=-1, chk_time_var=-1;
-        int chk_surf=-1, chk_total=-1;
+    // Define dimensions
+    // "system" is the link index dimension (fixed size)
+    NC_CHECK(nc_def_dim(ncid, "system", num_systems, &sys_dimid));
 
-        if (nc_inq_dimid(ncid, "system", &chk_sys_dim)  == NC_NOERR &&
-            nc_inq_dimid(ncid, "time",   &chk_time_dim) == NC_NOERR &&
-            nc_inq_varid(ncid, "system", &chk_sys_var)  == NC_NOERR &&
-            nc_inq_varid(ncid, "time",   &chk_time_var) == NC_NOERR &&
-            nc_inq_varid(ncid, "surface_runoff_mmhr", &chk_surf)  == NC_NOERR &&
-            nc_inq_varid(ncid, "total_runoff_mmhr",   &chk_total) == NC_NOERR) {
-            // Also check that 'system' dimension matches
-            size_t sys_len = 0;
-            if (nc_inq_dimlen(ncid, chk_sys_dim, &sys_len) == NC_NOERR &&
-                (int)sys_len == num_systems) {
-                schema_ok = true;
-            }
-        }
+    // "time" is also fixed-size (num_queries); this is required for contiguity
+    NC_CHECK(nc_def_dim(ncid, "time", num_queries, &time_dimid));
 
-        if (!schema_ok) {
-            // Close the bad or incompatible file — we'll recreate
-            nc_close(ncid);
-            exists = false;
-        }
+    // Define coordinate variables: system, time
+    NC_CHECK(nc_def_var(ncid, "system", NC_UINT,   1, &sys_dimid,  &sys_varid));
+    NC_CHECK(nc_def_var(ncid, "time",   NC_DOUBLE, 1, &time_dimid, &time_varid));
+
+    // Attributes for "system"
+    NC_CHECK(nc_put_att_text(ncid, sys_varid, "long_name", 6, "LinkID"));
+
+    // Attributes for "time"
+    NC_CHECK(nc_put_att_text(ncid, time_varid, "long_name", 4, "Time"));
+    const std::string tu = "minutes since " + time_origin;  // e.g. "minutes since 1991-01-01T00:00:00Z"
+    NC_CHECK(nc_put_att_text(ncid, time_varid, "units",    tu.size(), tu.c_str()));
+    NC_CHECK(nc_put_att_text(ncid, time_varid, "calendar", 9, "gregorian"));
+
+    // Define data variables: surface_runoff_mmhr(system, time),
+    //                        total_runoff_mmhr(system, time)
+    int dims2[2] = { sys_dimid, time_dimid };
+
+    NC_CHECK(nc_def_var(ncid, "surface_runoff_mmhr", NC_FLOAT, 2, dims2, &surf_varid));
+    NC_CHECK(nc_def_var(ncid, "total_runoff_mmhr",   NC_FLOAT, 2, dims2, &total_varid));
+
+    // Force contiguous layout on the runoff variables for fastest sequential reads
+    // (allowed because neither dimension is NC_UNLIMITED)
+    NC_CHECK(nc_def_var_chunking(ncid, surf_varid,  NC_CONTIGUOUS, nullptr));
+    NC_CHECK(nc_def_var_chunking(ncid, total_varid, NC_CONTIGUOUS, nullptr));
+
+    // Descriptive metadata
+    NC_CHECK(nc_put_att_text(ncid, surf_varid,  "long_name", 22, "Surface runoff rate"));
+    NC_CHECK(nc_put_att_text(ncid, total_varid, "long_name", 20, "Total runoff rate"));
+    NC_CHECK(nc_put_att_text(ncid, surf_varid,  "units",      7, "mm hr-1"));
+    NC_CHECK(nc_put_att_text(ncid, total_varid, "units",      7, "mm hr-1"));
+
+    // Optional: fill/missing values for safer downstream handling
+    {
+        float fv = -9999.0f;
+        NC_CHECK(nc_put_att_float(ncid, surf_varid,  "_FillValue",    NC_FLOAT, 1, &fv));
+        NC_CHECK(nc_put_att_float(ncid, total_varid, "_FillValue",    NC_FLOAT, 1, &fv));
+        NC_CHECK(nc_put_att_float(ncid, surf_varid,  "missing_value", NC_FLOAT, 1, &fv));
+        NC_CHECK(nc_put_att_float(ncid, total_varid, "missing_value", NC_FLOAT, 1, &fv));
     }
 
-    if (!exists || !schema_ok) {
-        // Create a fresh file with the expected schema
-        NC_CHECK(nc_create(filename.c_str(), NC_NETCDF4 | NC_CLOBBER, &ncid));
+    // End define mode, write coordinate vars and data
+    NC_CHECK(nc_enddef(ncid));
 
-        // Dimensions
-        NC_CHECK(nc_def_dim(ncid, "system",  num_systems,  &sys_dimid));
-        NC_CHECK(nc_def_dim(ncid, "time",    NC_UNLIMITED, &time_dimid));
+    // Write coordinates
+    NC_CHECK(nc_put_var_uint(ncid,   sys_varid,  linkid_vals));
+    NC_CHECK(nc_put_var_double(ncid, time_varid, time_vals));
 
-        // Coordinate variables
-        NC_CHECK(nc_def_var(ncid, "system", NC_UINT,   1, &sys_dimid,  &sys_varid));
-        NC_CHECK(nc_def_var(ncid, "time",   NC_DOUBLE, 1, &time_dimid, &time_varid));
-        NC_CHECK(nc_put_att_text(ncid, sys_varid,  "long_name", 6, "LinkID"));
-        NC_CHECK(nc_put_att_text(ncid, time_varid, "long_name", 4, "Time"));
-        const std::string tu = "minutes since " + time_origin;
-        NC_CHECK(nc_put_att_text(ncid, time_varid, "units",    tu.size(), tu.c_str()));
-        NC_CHECK(nc_put_att_text(ncid, time_varid, "calendar", 9, "gregorian"));
+    // Write data as single contiguous slabs:
+    // surf_mmhr and total_mmhr are laid out as:
+    //   index = system * num_queries + time
+    NC_CHECK(nc_put_var_float(ncid, surf_varid,  surf_mmhr));
+    NC_CHECK(nc_put_var_float(ncid, total_varid, total_mmhr));
 
-        // Data variables (system x time)
-        int dims2[2] = { sys_dimid, time_dimid };
-        NC_CHECK(nc_def_var(ncid, "surface_runoff_mmhr", NC_FLOAT, 2, dims2, &surf_varid));
-        NC_CHECK(nc_def_var(ncid, "total_runoff_mmhr",   NC_FLOAT, 2, dims2, &total_varid));
-
-        // Unlimited dims MUST be chunked; choose (all systems, 1 time) for efficient appends
-        {
-            size_t chunks[2] = { static_cast<size_t>(num_systems), 1 };
-            NC_CHECK(nc_def_var_chunking(ncid, surf_varid,  NC_CHUNKED, chunks));
-            NC_CHECK(nc_def_var_chunking(ncid, total_varid, NC_CHUNKED, chunks));
-        }
-
-        // (Optional) compression — comment out if you want raw speed over space
-        // int shuffle=1, deflate=1, level=1;
-        // NC_CHECK(nc_def_var_deflate(ncid, surf_varid, shuffle, deflate, level));
-        // NC_CHECK(nc_def_var_deflate(ncid, total_varid, shuffle, deflate, level));
-
-        // Metadata
-        NC_CHECK(nc_put_att_text(ncid, surf_varid,  "long_name", 22, "Surface runoff rate"));
-        NC_CHECK(nc_put_att_text(ncid, total_varid, "long_name", 20, "Total runoff rate"));
-        NC_CHECK(nc_put_att_text(ncid, surf_varid,  "units",      7, "mm hr-1"));
-        NC_CHECK(nc_put_att_text(ncid, total_varid, "units",      7, "mm hr-1"));
-        {
-            float fv = -9999.0f;
-            NC_CHECK(nc_put_att_float(ncid, surf_varid,  "_FillValue",    NC_FLOAT, 1, &fv));
-            NC_CHECK(nc_put_att_float(ncid, total_varid, "_FillValue",    NC_FLOAT, 1, &fv));
-            NC_CHECK(nc_put_att_float(ncid, surf_varid,  "missing_value", NC_FLOAT, 1, &fv));
-            NC_CHECK(nc_put_att_float(ncid, total_varid, "missing_value", NC_FLOAT, 1, &fv));
-        }
-
-        // End define mode and write static coordinate(s)
-        NC_CHECK(nc_enddef(ncid));
-        NC_CHECK(nc_put_var_uint(ncid, sys_varid, linkid_vals));
-    } else {
-        // Reuse IDs from existing, valid file
-        NC_CHECK(nc_inq_dimid(ncid, "system", &sys_dimid));
-        NC_CHECK(nc_inq_dimid(ncid, "time",   &time_dimid));
-        NC_CHECK(nc_inq_varid(ncid, "system", &sys_varid));
-        NC_CHECK(nc_inq_varid(ncid, "time",   &time_varid));
-        NC_CHECK(nc_inq_varid(ncid, "surface_runoff_mmhr", &surf_varid));
-        NC_CHECK(nc_inq_varid(ncid, "total_runoff_mmhr",   &total_varid));
-    }
-
-//     // Append at current time length
-//     size_t tlen = 0;
-//     NC_CHECK(nc_inq_dimlen(ncid, time_dimid, &tlen));
-
-//     // Write the new time values at [tlen ... tlen+num_queries-1]
-//     {
-//         size_t startT[1] = { tlen };
-//         size_t countT[1] = { static_cast<size_t>(num_queries) };
-//         NC_CHECK(nc_put_vara_double(ncid, time_varid, startT, countT, time_vals));
-//     }
-
-//     // Write data slabs (system x time), appending along time
-//     {
-//         size_t start2[2] = { 0, tlen };
-//         size_t count2[2] = { static_cast<size_t>(num_systems),
-//                              static_cast<size_t>(num_queries) };
-//         NC_CHECK(nc_put_vara_float(ncid, surf_varid,  start2, count2, surf_mmhr));
-//         NC_CHECK(nc_put_vara_float(ncid, total_varid, start2, count2, total_mmhr));
-//     }
-
-//     // Flush and close
-//     NC_CHECK(nc_sync(ncid));
-//     NC_CHECK(nc_close(ncid));
-// }
-    // After locating var IDs and before nc_put_vara_double:
-    double last_time = -std::numeric_limits<double>::infinity();
-    size_t tlen = 0;
-    NC_CHECK(nc_inq_dimlen(ncid, time_dimid, &tlen));
-    if (tlen > 0) {
-        size_t start1[1] = { tlen - 1 }, count1[1] = { 1 };
-        NC_CHECK(nc_get_vara_double(ncid, time_varid, start1, count1, &last_time));
-    }
-
-    // Find first strictly greater sample
-    int first = 0;
-    while (first < num_queries && !(time_vals[first] > last_time)) ++first;
-
-    if (first >= num_queries) {
-        // Nothing new; close and return
-        nc_close(ncid);
-        return;
-    }
-
-    // Write times
-    size_t startT[1] = { tlen };
-    size_t countT[1] = { (size_t)(num_queries - first) };
-    NC_CHECK(nc_put_vara_double(ncid, time_varid, startT, countT, time_vals + first));
-
-    // Write data aligned to the kept times
-    size_t start2[2] = { 0, tlen };
-    size_t count2[2] = { (size_t)num_systems, (size_t)(num_queries - first) };
-    NC_CHECK(nc_put_vara_float(ncid, surf_varid,  start2, count2, surf_mmhr  + (size_t)first * (size_t)num_systems));
-    NC_CHECK(nc_put_vara_float(ncid, total_varid, start2, count2, total_mmhr + (size_t)first * (size_t)num_systems));
-
-//   // Flush and close
-    NC_CHECK(nc_sync(ncid));
+    // Close file
     NC_CHECK(nc_close(ncid));
 }
-

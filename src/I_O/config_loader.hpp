@@ -77,6 +77,8 @@ struct ModelConfig {
     std::string              output_file;
     std::string              final_output_file;
     std::string              runoff_output_file;  
+    bool                     final_per_year;      // write final only once per year if true
+    double                   final_interval_minutes; // minutes between final snapshot files (<=0 disables)
     
     // Solver
     double rtol;                
