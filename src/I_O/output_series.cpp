@@ -8,6 +8,7 @@
 #include "stream.hpp"                   // for Runoff5
 #include <unordered_map>                // for LookupMapper
 #include <algorithm>
+#include <cstdlib>
 
 #define NC_CHECK(call) \
     do { \
@@ -433,19 +434,37 @@ void write_runoff_rates_netcdf(const std::string& filename,
                                const uint32_t*    linkid_vals, // [num_systems]
                                int                num_systems,
                                int                num_queries,
-                               const std::string& time_origin)
+                               const std::string& time_origin,
+                               bool write_surf,
+                               bool write_total)
 {
     int ncid, sys_dimid, time_dimid;
     int sys_varid, time_varid, surf_varid, total_varid;
 
     // Basic guards to avoid invalid NetCDF calls
     if (num_systems <= 0 || num_queries <= 0 ||
-        surf_mmhr == nullptr || total_mmhr == nullptr ||
+        // surf_mmhr == nullptr || total_mmhr == nullptr ||
         time_vals == nullptr || linkid_vals == nullptr)
     {
         std::cerr << "[RUNOFF_NC] Skipping write for " << filename
                   << " (num_systems=" << num_systems
                   << ", num_queries=" << num_queries << ")\n";
+        return;
+    }
+
+    if (!write_surf && !write_total) {
+        std::cerr << "[RUNOFF_NC] Skipping write for " << filename
+                  << " (no runoff vars selected)\n";
+        return;
+    }
+    if (write_surf && surf_mmhr == nullptr) {
+        std::cerr << "[RUNOFF_NC] Skipping write for " << filename
+                  << " (write_surf requested but surf_mmhr is null)\n";
+        return;
+    }
+    if (write_total && total_mmhr == nullptr) {
+        std::cerr << "[RUNOFF_NC] Skipping write for " << filename
+                  << " (write_total requested but total_mmhr is null)\n";
         return;
     }
 
@@ -476,26 +495,46 @@ void write_runoff_rates_netcdf(const std::string& filename,
     //                        total_runoff_mmhr(system, time)
     int dims2[2] = { sys_dimid, time_dimid };
 
-    NC_CHECK(nc_def_var(ncid, "surface_runoff_mmhr", NC_FLOAT, 2, dims2, &surf_varid));
-    NC_CHECK(nc_def_var(ncid, "total_runoff_mmhr",   NC_FLOAT, 2, dims2, &total_varid));
+    // NC_CHECK(nc_def_var(ncid, "surface_runoff_mmhr", NC_FLOAT, 2, dims2, &surf_varid));
+    // NC_CHECK(nc_def_var(ncid, "total_runoff_mmhr",   NC_FLOAT, 2, dims2, &total_varid));
 
-    // Force contiguous layout on the runoff variables for fastest sequential reads
-    // (allowed because neither dimension is NC_UNLIMITED)
-    NC_CHECK(nc_def_var_chunking(ncid, surf_varid,  NC_CONTIGUOUS, nullptr));
-    NC_CHECK(nc_def_var_chunking(ncid, total_varid, NC_CONTIGUOUS, nullptr));
+    // // Force contiguous layout on the runoff variables for fastest sequential reads
+    // // (allowed because neither dimension is NC_UNLIMITED)
+    // NC_CHECK(nc_def_var_chunking(ncid, surf_varid,  NC_CONTIGUOUS, nullptr));
+    // NC_CHECK(nc_def_var_chunking(ncid, total_varid, NC_CONTIGUOUS, nullptr));
 
-    // Descriptive metadata
-    NC_CHECK(nc_put_att_text(ncid, surf_varid,  "long_name", 22, "Surface runoff rate"));
-    NC_CHECK(nc_put_att_text(ncid, total_varid, "long_name", 20, "Total runoff rate"));
-    NC_CHECK(nc_put_att_text(ncid, surf_varid,  "units",      7, "mm hr-1"));
-    NC_CHECK(nc_put_att_text(ncid, total_varid, "units",      7, "mm hr-1"));
+    // // Descriptive metadata
+    // NC_CHECK(nc_put_att_text(ncid, surf_varid,  "long_name", 22, "Surface runoff rate"));
+    // NC_CHECK(nc_put_att_text(ncid, total_varid, "long_name", 20, "Total runoff rate"));
+    // NC_CHECK(nc_put_att_text(ncid, surf_varid,  "units",      7, "mm hr-1"));
+    // NC_CHECK(nc_put_att_text(ncid, total_varid, "units",      7, "mm hr-1"));
 
-    // Optional: fill/missing values for safer downstream handling
-    {
+    // // Optional: fill/missing values for safer downstream handling
+    // {
+    //     float fv = -9999.0f;
+    //     NC_CHECK(nc_put_att_float(ncid, surf_varid,  "_FillValue",    NC_FLOAT, 1, &fv));
+    //     NC_CHECK(nc_put_att_float(ncid, total_varid, "_FillValue",    NC_FLOAT, 1, &fv));
+    //     NC_CHECK(nc_put_att_float(ncid, surf_varid,  "missing_value", NC_FLOAT, 1, &fv));
+    //     NC_CHECK(nc_put_att_float(ncid, total_varid, "missing_value", NC_FLOAT, 1, &fv));
+    // }
+
+    if (write_surf) {
+        NC_CHECK(nc_def_var(ncid, "surface_runoff_mmhr", NC_FLOAT, 2, dims2, &surf_varid));
+        NC_CHECK(nc_def_var_chunking(ncid, surf_varid, NC_CONTIGUOUS, nullptr));
+        NC_CHECK(nc_put_att_text(ncid, surf_varid, "long_name", 22, "Surface runoff rate"));
+        NC_CHECK(nc_put_att_text(ncid, surf_varid, "units", 7, "mm hr-1"));
         float fv = -9999.0f;
-        NC_CHECK(nc_put_att_float(ncid, surf_varid,  "_FillValue",    NC_FLOAT, 1, &fv));
-        NC_CHECK(nc_put_att_float(ncid, total_varid, "_FillValue",    NC_FLOAT, 1, &fv));
-        NC_CHECK(nc_put_att_float(ncid, surf_varid,  "missing_value", NC_FLOAT, 1, &fv));
+        NC_CHECK(nc_put_att_float(ncid, surf_varid, "_FillValue", NC_FLOAT, 1, &fv));
+        NC_CHECK(nc_put_att_float(ncid, surf_varid, "missing_value", NC_FLOAT, 1, &fv));
+    }
+
+    if (write_total) {
+        NC_CHECK(nc_def_var(ncid, "total_runoff_mmhr", NC_FLOAT, 2, dims2, &total_varid));
+        NC_CHECK(nc_def_var_chunking(ncid, total_varid, NC_CONTIGUOUS, nullptr));
+        NC_CHECK(nc_put_att_text(ncid, total_varid, "long_name", 20, "Total runoff rate"));
+        NC_CHECK(nc_put_att_text(ncid, total_varid, "units", 7, "mm hr-1"));
+        float fv = -9999.0f;
+        NC_CHECK(nc_put_att_float(ncid, total_varid, "_FillValue", NC_FLOAT, 1, &fv));
         NC_CHECK(nc_put_att_float(ncid, total_varid, "missing_value", NC_FLOAT, 1, &fv));
     }
 
@@ -509,8 +548,14 @@ void write_runoff_rates_netcdf(const std::string& filename,
     // Write data as single contiguous slabs:
     // surf_mmhr and total_mmhr are laid out as:
     //   index = system * num_queries + time
-    NC_CHECK(nc_put_var_float(ncid, surf_varid,  surf_mmhr));
-    NC_CHECK(nc_put_var_float(ncid, total_varid, total_mmhr));
+    // NC_CHECK(nc_put_var_float(ncid, surf_varid,  surf_mmhr));
+    // NC_CHECK(nc_put_var_float(ncid, total_varid, total_mmhr));
+    if (write_surf) {
+        NC_CHECK(nc_put_var_float(ncid, surf_varid, surf_mmhr));
+    }
+    if (write_total) {
+        NC_CHECK(nc_put_var_float(ncid, total_varid, total_mmhr));
+    }
 
     // Close file
     NC_CHECK(nc_close(ncid));
