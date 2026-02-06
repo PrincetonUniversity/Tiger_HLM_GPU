@@ -77,6 +77,7 @@ struct ModelConfig {
     std::string              output_file;
     std::string              final_output_file;
     std::string              runoff_output_file;  
+    std::vector<std::string> runoff_vars;         // optional: which runoff vars to write
     bool                     final_per_year;      // write final only once per year if true
     double                   final_interval_minutes; // minutes between final snapshot files (<=0 disables)
     
@@ -109,6 +110,7 @@ public:
     bool        getBool(const std::string& key, bool defaultValue = false);
     std::vector<int>    getIntArray(const std::string& key);
     std::vector<double> getDoubleArray(const std::string& key);
+    std::vector<std::string> getStringArray(const std::string& key);
     std::vector<std::map<std::string, std::string>> getObjectArray(const std::string& key);
     void printParsedData();
 
