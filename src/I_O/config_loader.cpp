@@ -547,14 +547,14 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     // Optional: output.runoff_vars (defaults to both if missing)
     // YAML example:
     //   output:
-    //     runoff_vars: [surf_runoff, total_runoff]
+    //     runoff_vars: [surface_runoff, total_runoff]
     // Accepted aliases:
-    //   surf, surface, surface_runoff, surf_runoff
+    //   surf, surface, surface_runoff, surface_runoff
     //   total, total_runoff
     // ─────────────────────────────────────────────────────────────
     {
         auto arr = parser.getStringArray("output.runoff_vars");
-        std::set<std::string> picked; // normalized names: "surf_runoff", "total_runoff"
+        std::set<std::string> picked; // normalized names: "surface_runoff", "total_runoff"
 
         auto norm = [](std::string s) {
             std::transform(s.begin(), s.end(), s.begin(), ::tolower);
@@ -569,23 +569,23 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
             s = norm(s);
             if (s.empty()) continue;
 
-            if (s == "surf" || s == "surface" || s == "surface_runoff" || s == "surf_runoff") {
-                picked.insert("surf_runoff");
+            if (s == "surf" || s == "surface" || s == "surface_runoff" || s == "surface_runoff") {
+                picked.insert("surface_runoff");
             } else if (s == "total" || s == "total_runoff") {
                 picked.insert("total_runoff");
             } else if (s == "both" || s == "all") {
-                picked.insert("surf_runoff");
+                picked.insert("surface_runoff");
                 picked.insert("total_runoff");
             } else {
                 throw std::runtime_error(
                     "output.runoff_vars: unknown entry '" + s +
-                    "'. Use surf_runoff and/or total_runoff.");
+                    "'. Use surface_runoff and/or total_runoff.");
             }
         }
 
         // Default if not specified: write both
         if (picked.empty()) {
-            picked.insert("surf_runoff");
+            picked.insert("surface_runoff");
             picked.insert("total_runoff");
         }
 
