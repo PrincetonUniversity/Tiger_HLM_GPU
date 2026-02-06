@@ -19,7 +19,7 @@
 #include <unordered_map>
 namespace fs = std::filesystem;  
 #include <limits>
-
+#include <unordered_set>
 
 // CUDA & GPU Headers
 #include <cuda_runtime.h>           
@@ -793,7 +793,7 @@ void simulateChunk(const ModelConfig& config,
     // ───────── Prepare solver input arrays ─────────
     // DEBUG: print cumulative runoff values at chunk start (for first system)
     if (!streams.empty()) {
-        std::cout << "[DEBUG] chunk start surf_runoff="
+        std::cout << "[DEBUG] chunk start surface_runoff="
                 << streams[0].y0[Runoff5::STATE_SURF_RUNOFF]
                 << " total="
                 << streams[0].y0[Runoff5::STATE_TOTAL_RUNOFF]
@@ -1907,16 +1907,32 @@ void handleSolverOutputs(const ModelConfig& config,
     std::vector<float> hourly_total_mmhr = std::move(r.total_mmhr);
 
     if (!config.runoff_output_file.empty()) {
+        // Determine which runoff vars to write (default both if config.runoff_vars empty)
+        bool write_surf  = true;
+        bool write_total = true;
+        if (!config.runoff_vars.empty()) {
+            write_surf = false;
+            write_total = false;
+            for (auto s : config.runoff_vars) {
+                std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+                if (s == "surface_runoff")  write_surf = true;
+                if (s == "total_runoff") write_total = true;
+            }
+        }
         logWrite(std::filesystem::path(runoff_file).filename().string());
         write_runoff_rates_netcdf(
             runoff_file,
-            /*surf_mmhr*/  hourly_surf_mmhr.data(),   // ns * nt_hourly
-            /*total_mmhr*/ hourly_total_mmhr.data(),  // ns * nt_hourly
+            // /*surf_mmhr*/  hourly_surf_mmhr.data(),   // ns * nt_hourly
+            // /*total_mmhr*/ hourly_total_mmhr.data(),  // ns * nt_hourly
+            /*surf_mmhr*/  write_surf  ? hourly_surf_mmhr.data()  : nullptr,
+            /*total_mmhr*/ write_total ? hourly_total_mmhr.data() : nullptr,
             /*time_vals*/  hourly_times,              // length nt_hourly, endpoints for each bin
             /*link_ids*/   link_ids.data(),
             /*num_systems*/ns,
             /*num_queries*/nt_hourly,
-            /*origin*/     time_origin
+            /*origin*/     time_origin,
+            /*write_surf*/ write_surf,
+            /*write_total*/write_total
         );
     }
 
