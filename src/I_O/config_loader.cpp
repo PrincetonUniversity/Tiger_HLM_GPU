@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cctype>
+#include <set>
 
 // Implementation of SimpleYamlParser methods
 void SimpleYamlParser::parseFile(const std::string& filename) {
@@ -307,6 +308,11 @@ std::vector<double> SimpleYamlParser::getDoubleArray(const std::string& key) {
     return result;
 }
 
+std::vector<std::string> SimpleYamlParser::getStringArray(const std::string& key) {
+    auto it = simpleArrayMap.find(key);
+    return (it != simpleArrayMap.end()) ? it->second : std::vector<std::string>();
+}
+
 std::vector<std::map<std::string, std::string>> SimpleYamlParser::getObjectArray(const std::string& key) {
     auto it = arrayMap.find(key);
     return (it != arrayMap.end()) ? it->second : std::vector<std::map<std::string, std::string>>();
@@ -536,6 +542,55 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     config.final_output_file = parser.getString("output.final_output_file");
     config.runoff_output_file = parser.getString("output.runoff_output_file");
     config.final_per_year = parser.getBool("output.final_per_year", false);
+
+    // ─────────────────────────────────────────────────────────────
+    // Optional: output.runoff_vars (defaults to both if missing)
+    // YAML example:
+    //   output:
+    //     runoff_vars: [surface_runoff, total_runoff]
+    // Accepted aliases:
+    //   surf, surface, surface_runoff, surface_runoff
+    //   total, total_runoff
+    // ─────────────────────────────────────────────────────────────
+    {
+        auto arr = parser.getStringArray("output.runoff_vars");
+        std::set<std::string> picked; // normalized names: "surface_runoff", "total_runoff"
+
+        auto norm = [](std::string s) {
+            std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+            // trim
+            auto isws = [](unsigned char c){ return std::isspace(c); };
+            s.erase(s.begin(), std::find_if(s.begin(), s.end(), [&](unsigned char c){ return !isws(c); }));
+            s.erase(std::find_if(s.rbegin(), s.rend(), [&](unsigned char c){ return !isws(c); }).base(), s.end());
+            return s;
+        };
+
+        for (auto s : arr) {
+            s = norm(s);
+            if (s.empty()) continue;
+
+            if (s == "surf" || s == "surface" || s == "surface_runoff" || s == "surface_runoff") {
+                picked.insert("surface_runoff");
+            } else if (s == "total" || s == "total_runoff") {
+                picked.insert("total_runoff");
+            } else if (s == "both" || s == "all") {
+                picked.insert("surface_runoff");
+                picked.insert("total_runoff");
+            } else {
+                throw std::runtime_error(
+                    "output.runoff_vars: unknown entry '" + s +
+                    "'. Use surface_runoff and/or total_runoff.");
+            }
+        }
+
+        // Default if not specified: write both
+        if (picked.empty()) {
+            picked.insert("surface_runoff");
+            picked.insert("total_runoff");
+        }
+
+        config.runoff_vars.assign(picked.begin(), picked.end());
+    }
 
     // Solver (provide defaults = current hard-coded values)
     config.rtol                 = parser.getDouble("solver.rtol",        1e-6);

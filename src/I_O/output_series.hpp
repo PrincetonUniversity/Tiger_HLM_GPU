@@ -141,4 +141,6 @@ void write_runoff_rates_netcdf(const std::string& filename,
                                const uint32_t*    linkid_vals, // [num_systems]
                                int                num_systems,
                                int                num_queries,
-                               const std::string& time_origin);
+                               const std::string& time_origin,
+                               bool write_surf = true,
+                               bool write_total = true);
