@@ -848,11 +848,25 @@ NCForcing loadForcingData(const ModelConfig& config,
     std::vector<ForcingEntry> forcings;
     forcings.reserve(config.forcing_variables.size());
 
+    // // Parse time_resolution ("1h", "0.5h", "30min", "0.5") to hrs
+    auto parse_dt_hours = [](const std::string& res) -> double {
+            std::string s = res;
+            std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+            s.erase(std::remove_if(s.begin(), s.end(), ::isspace), s.end());
+            if (!s.empty() && s.back() == 'h') {
+                try { double v = std::stod(s.substr(0, s.size()-1)); if (v > 0.0) return v; }
+                catch (...) {}
+            }
+            if (s.size() > 3 && s.substr(s.size()-3) == "min") {
+                try { double v = std::stod(s.substr(0, s.size()-3)); if (v > 0.0) return v/60.0; }
+                catch (...) {}
+            }
+            try { double v = std::stod(s); if (v > 0.0) return v; } catch (...) {}
+            throw std::runtime_error("Unsupported time_resolution: '" + res + "'");
+        };
+
     for (const auto& f : config.forcing_variables) {
-        const double dt_hr =
-            (f.time_resolution == "1h")  ? 1.0 :
-            (f.time_resolution == "24h") ? 24.0 :
-            throw std::runtime_error("Unsupported resolution: " + f.time_resolution);
+        const double dt_hr = parse_dt_hours(f.time_resolution);
 
         std::vector<std::string> files;
 
