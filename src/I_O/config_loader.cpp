@@ -401,7 +401,7 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
     }
 
     config.forcings_path = parser.getString("forcings.path");
-    config.time_chunking = parser.getBool("forcings.time_chunking");
+    config.time_chunking = parser.getBool("forcings.time_chunking", true);
 
     // Load forcing variables
     auto forcingVars = parser.getObjectArray("forcings.variables");
