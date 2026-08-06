@@ -19,6 +19,7 @@ __host__ __device__ inline bool finite_val(double x) {
 #include "../I_O/forcing_data.h"    // for d_forc_data, nForc
 
 // bring them into the local namespace so we can write HamonPET(...) etc.
+using ETMethods::OudinPET;
 using ETMethods::HamonPET;
 using ETMethods::ETactual;
 using SoilTemp::soiltemp;
@@ -147,7 +148,8 @@ struct Runoff5
         double doy        = 1.0 + t/1440.0;
 
         // ── 4) compute ET for static tank─────────────────────
-        double pet    = HamonPET(temperature, lat, doy); // potential evapotranspiration [m/min]
+        // double pet    = HamonPET(temperature, lat, doy); // potential evapotranspiration [m/min]
+        double pet = OudinPET(temperature, lat, doy); // potential evapotranspiration [m/min] (add switch???)
         // double Emax   = fmin(pet, h_stat); // maximum possible evapotranspiration [m/min] from static tank, cannot be more than h1 [m]
         double pet_clamped = fmax(0.0, pet); // clamp PET to non-negative
         double Emax = fmin(h_stat, fmax(0.0, pet_clamped));   // clamp PET, cap by storage

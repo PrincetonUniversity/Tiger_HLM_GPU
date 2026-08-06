@@ -5,6 +5,20 @@
 
 namespace ETMethods {
 
+// ───────── OudinPET ─────────
+// Estimates daily PET [m/min] via the method presented in Oudin et al. 2005.
+// The method use extraterresterial radiation based on latitude and doy as well as temperature.
+// 
+// @param temperature  Daily average air temperature [°C]
+// @param latitude     Hillslope latitude [°]
+// @param doy          Day‐of‐year [1–365]
+// @returns            PET in m/min
+__host__ __device__
+double OudinPET(double temperature,
+                double latitude,
+                double doy);
+
+
 // ───────── HamonPET ─────────
 // Estimates daily PET [m/min] via the Hamon (CBM) model.
 //

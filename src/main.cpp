@@ -612,7 +612,10 @@ void simulateYear(int year, const ModelConfig& config, std::vector<Stream<Runoff
 
     // Fallback to auto-compute
     if (DAYS_PER_CHUNK <= 0) {
-        DAYS_PER_CHUNK = computeDaysPerChunk(num_systems, config);
+        // DAYS_PER_CHUNK = computeDaysPerChunk(num_systems, config);
+        DAYS_PER_CHUNK = config.time_chunking
+            ? computeDaysPerChunk(num_systems, config)
+            : std::min(end_day - start_day + 1, computeDaysPerChunk(num_systems, config));
         std::cout << "[INFO] Using computed DAYS_PER_CHUNK = "
                 << DAYS_PER_CHUNK << "\n";
     } else {

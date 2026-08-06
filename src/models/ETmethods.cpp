@@ -5,6 +5,37 @@
 
 namespace ETMethods {
 
+// ───────── OudinPET ─────────
+// Implements Oudin PET estimation
+// See header for documentation
+double OudinPET(double temperature,
+                double latitude,
+                double doy)
+{
+    // Equation parameters optimized across different models and basins (Make as model parameters???)
+    const double K1 = 100; // Calibration Parameter from study
+    const double K2 = 5; // Temperature offset (c) calibration parameter from study 
+
+    // PET Computation
+    double PET = 0.0;
+    if (temperature + K2 > 0){
+        // Extraterrestrial radiation (MJ m-2 day-1)
+        const double PI = 3.14159265358979323846;
+        const double Gsc = 0.0820; // solar constant MJ m-2 min-1
+        double dr = 1 + 0.033 * std::cos(2 * PI * doy / 365); // inverse realtive distance earth-sun 
+        double delta = 0.409 * std::sin((2 * PI * doy / 365) - 1.39); // solar decimation
+        double phi = latitude * (PI / 180.0); // Latitude in degrees    
+        double ws = std::acos(-std::tan(phi) * std::tan(delta));
+        double Re = (24 * 60 / PI) * Gsc * dr * (ws * std::sin(phi) * std::sin(delta) + std::cos(phi) * std::cos(delta) * std::sin(ws)); //extraterrestial radation
+        // PET computation
+        const double lhf = 2.45; // latent heat flux MJ kg-1
+        const double rho = 1000; // density of water kg/m3
+        PET = (Re / (lhf * rho)) * (temperature + K2) / K1; // m/day
+        PET = PET / (24 * 60); //convert from m/day -> m/min
+    }
+    return PET;
+}
+
 // ───────── HamonPET ─────────
 // Implements Hamon PET estimation
 // See header for documentation
