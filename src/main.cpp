@@ -1578,6 +1578,22 @@ std::string formatDate(int Y, int M, int D) {
     return std::string(buf); // Return as std::string
 }
 
+// ───────── State index → name, for selected-state dense output ─────────
+static const char* runoff5_state_name(int idx) {
+    switch (idx) {
+        case Runoff5::STATE_SNOW:         return "snow";
+        case Runoff5::STATE_STATIC:       return "static";
+        case Runoff5::STATE_SURFACE:      return "surface";
+        case Runoff5::STATE_GRAV:         return "grav";
+        case Runoff5::STATE_AQUIFER:      return "aquifer";
+        case Runoff5::STATE_TEMP_AIR:     return "temp_air";
+        case Runoff5::STATE_TEMP_SOIL:    return "temp_soil";
+        case Runoff5::STATE_SURF_RUNOFF:  return "surf_runoff";
+        case Runoff5::STATE_TOTAL_RUNOFF: return "total_runoff";
+        default:                          return "unknown_state";
+    }
+}
+
 // ───────── Formats date+hour into "YYYYMMDDHH" ─────────
 std::string formatDateHour(int Y, int M, int D, int H) {
     char buf[11]; // YYYYMMDDHH + null terminator
@@ -1910,11 +1926,52 @@ void handleSolverOutputs(const ModelConfig& config,
 
     // ───────── DENSE 3D output ─────────
     if (!config.output_file.empty()) {
+        const bool use_subset =
+            !config.output_states.empty() && (int)config.output_states.size() < N_EQ;
+
         logWrite(std::filesystem::path(dense_file).filename().string());
-        write_dense_netcdf(dense_file, h_dense.data(),
-                           input.h_query_times.data(),
-                           link_ids.data(), state_ids.data(),
-                           nq, ns, N_EQ, time_origin);
+
+        if (use_subset) {
+            std::vector<int> selected;
+            selected.reserve(config.output_states.size());
+            for (int idx : config.output_states) {
+                if (idx < 0 || idx >= N_EQ) {
+                    std::cerr << "[ERROR] output.states contains index " << idx
+                              << " out of range [0, " << N_EQ - 1
+                              << "] - skipping dense write for this chunk.\n";
+                    selected.clear();
+                    break;
+                }
+                selected.push_back(idx);
+            }
+
+            if (!selected.empty()) {
+                std::vector<const char*> names(selected.size());
+                for (size_t i = 0; i < selected.size(); ++i) {
+                    names[i] = runoff5_state_name(selected[i]);
+                }
+
+                std::cout << "[INFO] Dense output: writing " << selected.size()
+                          << " of " << N_EQ << " states (subset via output.states)\n";
+
+                write_selected_dense_netcdf(
+                    dense_file,
+                    h_dense.data(),
+                    input.h_query_times.data(),
+                    link_ids.data(),
+                    selected.data(),
+                    names.data(),
+                    (int)selected.size(),
+                    nq, ns, N_EQ,
+                    time_origin
+                );
+            }
+        } else {
+            write_dense_netcdf(dense_file, h_dense.data(),
+                               input.h_query_times.data(),
+                               link_ids.data(), state_ids.data(),
+                               nq, ns, N_EQ, time_origin);
+        }
     } else {
         std::cout << "[SKIP] dense output disabled via config\n";
     }
