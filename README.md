@@ -2,7 +2,9 @@
 ![Repo Status](https://img.shields.io/badge/status-active-brightgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Tiger HLM Runoff** is a high-performance hydrologic model for simulating runoff at the hillslope level using GPU acceleration and distributed parallelism. It serves as the runoff generation component of the Tiger Hillslope Link Model (Tiger-HLM) framework. The complementary streamflow routing module is available at [Tiger HLM Routing](https://github.com/PrincetonUniversity/Tiger_HLM_Routing). This software can be used independently as well.
+**Tiger HLM Runoff** is a high-performance hydrologic model for simulating runoff at the hillslope level using GPU acceleration and distributed parallelism. It serves as the runoff generation component of the Tiger Hillslope Link Model (Tiger-HLM) framework. The complementary streamflow routing module is available at [Tiger HLM Routing](https://github.com/PrincetonUniversity/Tiger_HLM_Routing). This software can be used independently as well. 
+
+Note: The routing module is entirely Cpu-based. It is written in standard C++17 with OpenMP and requires only Boost headers and NetCDF. It compiles with GCC or any modern C++ compile and does not require CUDA or GPU hardware. 
 
 Please refer to the [wiki page](https://github.com/PrincetonUniversity/Tiger_HLM_GPU/wiki) for setup instructions and detailed documentation.
 
@@ -11,7 +13,7 @@ Please refer to the [wiki page](https://github.com/PrincetonUniversity/Tiger_HLM
 
 ### **1. Prerequisites**
 
-Modules required: **CUDA Toolkit**, **C++14 compiler**, **NetCDF C++**, **MPI** (optional), and **NCO** (for post-processing).
+Modules required: **CUDA Toolkit**, **C++14 compiler**, **NetCDF C++**, **MPI** (optional), and **NCO** (for post-processing). These requirements apply to the runoff module only.
 
 **Setting Up the Environment**
 
