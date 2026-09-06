@@ -1,6 +1,7 @@
 # Tiger-HLM Runoff (GPU)
 ![Repo Status](https://img.shields.io/badge/status-active-brightgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.16696727.svg)](https://doi.org/10.5281/zenodo.16696727)
 
 **Tiger HLM Runoff** is a high-performance hydrologic model for simulating runoff at the hillslope level using GPU acceleration and distributed parallelism. It serves as the runoff generation component of the Tiger Hillslope Link Model (Tiger-HLM) framework. The complementary streamflow routing module is available at [Tiger HLM Routing](https://github.com/PrincetonUniversity/Tiger_HLM_Routing). This software can be used independently as well. 
 
