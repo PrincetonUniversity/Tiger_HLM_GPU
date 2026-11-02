@@ -443,6 +443,15 @@ ModelConfig ConfigLoader::loadConfig(const std::string& filename) {
             }
         }
 
+        if (auto it = varMap.find("time_stamp"); it != varMap.end()) {
+            if (it->second == "end") {
+                var.stamp_at_end = true;
+            } else if (it->second != "start") {
+                throw std::runtime_error("time_stamp of forcing '" + var.name + "' must be 'start' or 'end', got '"
+                                         + it->second + "'");
+            }
+        }
+
         // NOTE: current SimpleYamlParser does not capture nested arrays per-variable (e.g., `files:`).
         // We rely on file_pattern (or file mapped to file_pattern) in ranged mode.
              

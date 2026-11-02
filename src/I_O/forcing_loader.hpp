@@ -86,6 +86,9 @@ struct ForcingEntry {
     std::string dims_lon;    // default "longitude"
 
     std::string lookup_csv;         // CSV mapping stream -> (lat_index, lon_index) for this forcing
+
+    // Record times mark the end of the interval each record covers
+    bool stamp_at_end = false;
 };
 
 // ─────────── NCForcing ───────────

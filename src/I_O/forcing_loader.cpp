@@ -524,10 +524,16 @@ void NCForcing::loadData() {
     // };
 
 
+    // Record covers [time, time + dt) with start stamps; [time - dt, time) with end stamps;
+    // records selected by the start of the interval
+    auto stamp_shift = [](const ForcingEntry& ent) -> time_t {
+        return ent.stamp_at_end ? static_cast<time_t>(std::llround(ent.dt_hours * 3600.0)) : 0;
+    };
 
     // ── first pass per forcing: compute nT[f] and set dt[f] ──
     for (int f = 0; f < nForc; ++f) {
         const auto& ent = entries[f];
+        const time_t shift = stamp_shift(ent);
         dt[f] = ent.dt_hours;
         size_t total_steps = 0;
 
@@ -650,13 +656,20 @@ void NCForcing::loadData() {
             read_time_epoch(ncid, tvar, ntim, tu, time_is_numeric, tepoch);
 
             // overlap with chunk
-            size_t i0 = 0; while (i0 < ntim && tepoch[i0] < chunk_start) ++i0;
-            size_t i1 = i0; while (i1 < ntim && tepoch[i1] < chunk_end)   ++i1;
+            size_t i0 = 0; while (i0 < ntim && tepoch[i0] - shift < chunk_start) ++i0;
+            size_t i1 = i0; while (i1 < ntim && tepoch[i1] - shift < chunk_end)   ++i1;
             if (i0 < i1) total_steps += (i1 - i0);
 
             nc_close(ncid);
         }
         nT[f] = total_steps;
+
+        // Warn if this chunk has fewer records than expected
+        const size_t expected = static_cast<size_t>(std::llround((chunk_end - chunk_start) / 3600.0 / ent.dt_hours));
+        if (nT[f] != expected) {
+            std::cerr << "Warning: forcing '" << ent.var_name << "' has " << nT[f] << " of " << expected
+                      << " records for this chunk\n";
+        }
     }
 
     // ── allocate final buffer [f][t][system] ──
@@ -687,6 +700,7 @@ void NCForcing::loadData() {
     // ── second pass: read [time][lat][lon] slices and scatter to [f][t][system] ──
     for (int f = 0; f < nForc; ++f) {
         const auto& ent = entries[f];
+        const time_t shift = stamp_shift(ent);
         const size_t Fbase = baseF(f);
         size_t t_written = 0;
 
@@ -731,8 +745,8 @@ void NCForcing::loadData() {
             read_time_epoch(ncid, tvar, ntim, tu, time_is_numeric, tepoch);
 
             // find [i0,i1) overlap for this file
-            size_t i0 = 0; while (i0 < ntim && tepoch[i0] < chunk_start) ++i0;
-            size_t i1 = i0; while (i1 < ntim && tepoch[i1] < chunk_end)   ++i1;
+            size_t i0 = 0; while (i0 < ntim && tepoch[i0] - shift < chunk_start) ++i0;
+            size_t i1 = i0; while (i1 < ntim && tepoch[i1] - shift < chunk_end)   ++i1;
             if (i0 >= i1) { nc_close(ncid); continue; }
 
             size_t start[3] = {0, 0, 0};

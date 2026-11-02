@@ -876,10 +876,16 @@ NCForcing loadForcingData(const ModelConfig& config,
         if (!f.ranged_by_name) {
             // YEARLY mode → single file with {year} replacement
             std::string file = f.file;
+            std::string next_year = file;
             if (auto pos = file.find("{year}"); pos != std::string::npos) {
                 file.replace(pos, 6, std::to_string(simYear));
+                next_year.replace(pos, 6, std::to_string(simYear + 1));
             }
             files = { config.forcings_path + file };
+            // With end stamps, the year's last interval is stamped in the next year's file.
+            if (f.stamp_at_end && next_year != f.file && fs::exists(config.forcings_path + next_year)) {
+                files.push_back(config.forcings_path + next_year);
+            }
         } else {
             // RANGED mode
             if (!f.files.empty()) {
@@ -911,8 +917,10 @@ NCForcing loadForcingData(const ModelConfig& config,
                 std::string fnSuffix = fs::path(suffix).filename().string();
 
                 // Pick overlapping files
+                int Yp = Ye, Mp = Me, Dp = De;
+                if (f.stamp_at_end) advanceDate(Yp, Mp, Dp, 1);
                 auto picked = select_ranged_files_overlapping(dir, fnPrefix, fnSuffix,
-                                                              Ys, Ms, Ds, Ye, Me, De);
+                                                              Ys, Ms, Ds, Yp, Mp, Dp);
                 if (picked.empty()) {
                     std::ostringstream oss;
                     oss << "No ranged files picked for variable '" << f.name
@@ -939,7 +947,8 @@ NCForcing loadForcingData(const ModelConfig& config,
             /*dims_time=*/f.dims_time,
             /*dims_lat=*/f.dims_lat,
             /*dims_lon=*/f.dims_lon,
-            /*lookup_csv=*/{} // set below
+            /*lookup_csv=*/{}, // set below
+            /*stamp_at_end=*/f.stamp_at_end
         };
 
         auto it = name2csv.find(f.name);
@@ -1368,7 +1377,8 @@ inline RunoffOut compute_runoff_rates_stitched(
 // ─────────────────────────────────────────────────────────────────────────────
 // Global tolerances for runoff rate computation
 // ─────────────────────────────────────────────────────────────────────────────
-constexpr double RUNOFF_ABS_EPS_MM  = 0.01;   // mm, physical jitter tolerance
+// Decreased RUNOFF_ABS_EPS_MM from 1e-2 to 1e-4 to retain baseflow at some locations
+constexpr double RUNOFF_ABS_EPS_MM  = 1e-4;   // mm, physical jitter tolerance
 constexpr double RUNOFF_REPAIR_EPS_M = 1e-8;  // m, numeric tolerance for monotone repair
 
 inline RunoffOut compute_runoff_rates_xdiff(

@@ -27,6 +27,9 @@ struct ForcingVariable {
     std::string dims_time;            // e.g. "valid_time" or "time"
     std::string dims_lat;             // e.g. "latitude"
     std::string dims_lon;             // e.g. "longitude"
+    // time_stamp: "start" (default) if a record's time is the start of the interval it
+    // covers, "end" if it is the end, as for accumulations such as AORC APCP.
+    bool stamp_at_end = false;
 };
 
 // Structure to hold forcing mapping configuration
