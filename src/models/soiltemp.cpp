@@ -17,7 +17,7 @@ double soiltemp(double Tair,
     const double Cs   = 1e6;    // J/m³/°C
     const double Kt   = 0.516;  // W/m/°C
     const double Cice = 8.93e6; // J/m³/°C
-    const double fs   = -2.7;   // m⁻¹
+    const double fs   = 2.7;    // m⁻¹, positive so line 28 eqn is dampened
     const double Zs   = 3.5e-2; // m (middle of 0–7 cm)
     const double delta_t   = 3600.0 * 24.0; // 1 day [s]
     const double CA   = Cs + Cice;
